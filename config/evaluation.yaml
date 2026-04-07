@@ -1,0 +1,17 @@
+evaluation:
+  batch_size: 128
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1_score
+    - confusion_matrix
+  generate_plots: true
+  plot_types:
+    - confusion_matrix
+    - roc_curve
+    - learning_curves
+
+inference:
+  return_probabilities: true
+  threshold: 0.5

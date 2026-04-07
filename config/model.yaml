@@ -1,0 +1,14 @@
+model:
+  family: neural_network
+  architecture: dense
+  input_features: null
+  output_features: null
+  hidden_layers: [128, 64, 32]
+  activation: relu
+  dropout_rate: 0.3
+  batch_normalization: true
+
+artifacts:
+  checkpoint_dir: artifacts/checkpoints
+  final_dir: artifacts/final
+  metadata_dir: artifacts/metadata

@@ -1,0 +1,14 @@
+experiment:
+  name: baseline_dense_v1
+  description: Configuracion base para validar el pipeline de la tesis.
+  tags:
+    - baseline
+    - dense
+    - tesis
+
+config_stack:
+  - config/base.yaml
+  - config/data.yaml
+  - config/model.yaml
+  - config/training.yaml
+  - config/evaluation.yaml

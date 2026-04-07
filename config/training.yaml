@@ -1,0 +1,18 @@
+training:
+  batch_size: 32
+  epochs: 100
+  learning_rate: 0.001
+  optimizer: adam
+  loss_function: categorical_crossentropy
+  metrics: [accuracy, precision, recall]
+  validation_frequency: 1
+
+  early_stopping:
+    enabled: true
+    patience: 10
+    monitor: val_loss
+
+  checkpoint:
+    enabled: true
+    save_best_only: true
+    monitor: val_loss
