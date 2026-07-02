@@ -1,8 +1,5 @@
-# Configuracion unificada para entornos simples o pruebas rapidas.
-# Para trabajo escalable, usar los archivos separados dentro de config/.
-
 project:
-  name: tesis_ia
+  name: tesis_ia_predictiva
   version: 0.1.0
   seed: 42
 
@@ -10,74 +7,32 @@ paths:
   data_dir: ./data
   artifacts_dir: ./artifacts
   outputs_dir: ./outputs
-  logs_dir: ./logs
-
-runtime:
-  environment: development
-  use_gpu: true
-  num_workers: 4
-
-logging:
-  level: INFO
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  file: logs/app.log
 
 data:
-  raw_path: data/raw
-  processed_path: data/processed
-  splits_path: data/splits
-  validation_split: 0.2
-  test_split: 0.1
-  random_state: 42
-
-preprocessing:
-  normalize: true
-  scale_method: standard
-  remove_outliers: false
-  handle_missing: mean
-  categorical_encoding: onehot
+  processed_path: data/processed/dataset_enriquecido.csv
+  train_years: [2021, 2022, 2023, 2024]
+  test_years: [2025]
+  target_column: unidades_vendidas
+  features: 
+    - lag_1
+    - lag_2
+    - lag_12
+    - ma_3m
+    - temp_max_promedio
+    - precipitacion_mm
+    - ipc_indice
+    - tipo_cambio_pyg_usd
 
 model:
-  family: neural_network
-  architecture: dense
-  input_features: null
-  output_features: null
-  hidden_layers: [128, 64, 32]
-  activation: relu
-  dropout_rate: 0.3
-  batch_normalization: true
-
+  family: linear_model
+  architecture: multiple_regression
+  
 training:
-  batch_size: 32
-  epochs: 100
-  learning_rate: 0.001
-  optimizer: adam
-  loss_function: categorical_crossentropy
-  metrics: [accuracy, precision, recall]
-  validation_frequency: 1
-  early_stopping:
-    enabled: true
-    patience: 10
-    monitor: val_loss
-  checkpoint:
-    enabled: true
-    save_best_only: true
-    monitor: val_loss
+  metrics: [mape, rmse]
 
 evaluation:
-  batch_size: 128
-  metrics:
-    - accuracy
-    - precision
-    - recall
-    - f1_score
-    - confusion_matrix
+  metrics: [mape, rmse]
   generate_plots: true
   plot_types:
-    - confusion_matrix
-    - roc_curve
-    - learning_curves
-
-inference:
-  return_probabilities: true
-  threshold: 0.5
+    - feature_importance
+    - actual_vs_predicted

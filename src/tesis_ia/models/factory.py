@@ -1,23 +1,22 @@
-"""Factory para instanciar modelos a partir de configuracion."""
-
 from __future__ import annotations
-
 from typing import Any
+from sklearn.linear_model import LinearRegression
 
-from tesis_ia.models.base_model import BaseModel
-
-
-def build_model(config: dict[str, Any]) -> BaseModel:
-    """Construye un modelo base usando la seccion `model`."""
+def build_model(config: dict[str, Any]) -> Any:
+    """Construye el modelo real a partir de la configuracion."""
     model_config = config.get("model", {})
-    family = model_config.get("family", "unknown")
-    architecture = model_config.get("architecture", "undefined")
-
-    params = {
-        "hidden_layers": model_config.get("hidden_layers", []),
-        "activation": model_config.get("activation"),
-        "dropout_rate": model_config.get("dropout_rate"),
-        "batch_normalization": model_config.get("batch_normalization", False),
-    }
-
-    return BaseModel(family=family, architecture=architecture, params=params)
+    family = model_config.get("family", "linear_model")
+    
+    if family == "linear_model":
+        print("[INFO] Instanciando Modelo Base: Regresion Lineal Multivariada.")
+        return LinearRegression()
+    elif family == "lightgbm":
+        # Queda preparado para la Fase 3 del cronograma
+        import lightgbm as lgb
+        return lgb.LGBMRegressor(random_state=config.get("project", {}).get("seed", 42))
+    elif family == "xgboost":
+        # Queda preparado para la Fase 3 del cronograma
+        import xgboost as xgb
+        return xgb.XGBRegressor(random_state=config.get("project", {}).get("seed", 42))
+    else:
+        raise ValueError(f"Familia de modelo no soportada en esta tesis: {family}")
