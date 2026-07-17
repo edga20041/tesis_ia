@@ -30,3 +30,11 @@ class DataPreprocessor:
         print(f"[DATA] Validacion (2025): {len(X_test):,} registros.")
         
         return X_train, y_train, X_test, y_test
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            "features": self.features,
+            "target": self.target,
+            "train_years": self.data_config.get("train_years", [2021, 2022, 2023, 2024]),
+            "test_years": self.data_config.get("test_years", [2025]),
+        }

@@ -18,6 +18,8 @@ data:
     - lag_2
     - lag_12
     - ma_3m
+    - price_gap_pct
+    - market_share_unidades
     - temp_max_promedio
     - precipitacion_mm
     - ipc_indice
