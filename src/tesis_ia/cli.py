@@ -9,7 +9,7 @@ from typing import Any
 
 from tesis_ia.config import load_config
 from tesis_ia.data.loader import DataLoader
-from tesis_ia.data.preprocessor import Preprocessor
+from tesis_ia.data.preprocessor import DataPreprocessor
 from tesis_ia.logger import configure_logging
 from tesis_ia.pipeline import run_evaluation, run_prediction, run_training
 
@@ -59,6 +59,6 @@ def data_main() -> None:
     payload = {
         "status": "planned",
         "data": DataLoader(config).describe(),
-        "preprocessing": Preprocessor(config).describe(),
+        "preprocessing": DataPreprocessor(config).describe(),
     }
     print(json.dumps(payload, indent=2, ensure_ascii=True))
