@@ -179,12 +179,20 @@ class DbTrainerPredictor:
                 AVG(unidades_vendidas) AS avg_unidades,
                 AVG(COALESCE(lag_1, unidades_vendidas)) AS last_lag_1,
                 AVG(COALESCE(lag_2, unidades_vendidas)) AS last_lag_2,
-                AVG(COALESCE(lag_12, unidades_vendidas)) AS last_lag_12,
                 AVG(COALESCE(ma_3m, unidades_vendidas)) AS last_ma_3m
             FROM ventas_mensuales
             GROUP BY id_producto
         """
-        query_exo = """
+        query_monthly_seasonality = """
+            SELECT 
+                id_producto,
+                mes,
+                AVG(unidades_vendidas) AS avg_mes
+            FROM ventas_mensuales
+            GROUP BY id_producto, mes
+        """
+
+        query_exo_exact = """
             SELECT 
                 vc.anio, vc.mes,
                 COALESCE(vc.temp_max_promedio, 30.0) AS temp_max_promedio,
@@ -200,10 +208,29 @@ class DbTrainerPredictor:
             LEFT JOIN variables_calendario vcal ON vc.anio = vcal.anio AND vc.mes = vcal.mes
         """
 
+        query_exo_by_month = """
+            SELECT 
+                vc.mes,
+                AVG(COALESCE(vc.temp_max_promedio, 30.0)) AS temp_max_promedio,
+                AVG(COALESCE(vc.temp_media_promedio, 25.0)) AS temp_media_promedio,
+                AVG(COALESCE(vc.precipitacion_mm, 100.0)) AS precipitacion_mm,
+                MAX(COALESCE(vmac.ipc_indice, 100.0)) AS ipc_indice,
+                AVG(COALESCE(vmac.ipc_var_interanual, 4.5)) AS ipc_var_interanual,
+                MAX(COALESCE(vmac.tipo_cambio_pyg_usd, 7200.0)) AS tipo_cambio_pyg_usd,
+                ROUND(AVG(COALESCE(vcal.cantidad_feriados, 0))) AS cantidad_feriados,
+                MAX(COALESCE(vcal.tiene_festivo_comercial, 0)) AS tiene_festivo_comercial
+            FROM variables_climaticas vc
+            LEFT JOIN variables_macroeconomicas vmac ON vc.anio = vmac.anio AND vc.mes = vmac.mes
+            LEFT JOIN variables_calendario vcal ON vc.anio = vcal.anio AND vc.mes = vcal.mes
+            GROUP BY vc.mes
+        """
+
         with self.engine.connect() as conn:
             prods_df = pd.read_sql(query_prods, conn)
             stats_df = pd.read_sql(query_stats, conn).set_index("id_producto")
-            exo_df = pd.read_sql(query_exo, conn).set_index(["anio", "mes"])
+            seasonality_df = pd.read_sql(query_monthly_seasonality, conn).set_index(["id_producto", "mes"])
+            exo_exact_df = pd.read_sql(query_exo_exact, conn).set_index(["anio", "mes"])
+            exo_month_df = pd.read_sql(query_exo_by_month, conn).set_index("mes")
 
         if prods_df.empty:
             print("[WARN] No hay productos para generar predicciones.")
@@ -226,11 +253,10 @@ class DbTrainerPredictor:
                 base_units = float(p_stat["avg_unidades"] or 50.0)
                 l1 = float(p_stat["last_lag_1"] or base_units)
                 l2 = float(p_stat["last_lag_2"] or base_units)
-                l12 = float(p_stat["last_lag_12"] or base_units)
                 ma3 = float(p_stat["last_ma_3m"] or base_units)
             else:
                 base_units = 50.0
-                l1, l2, l12, ma3 = 50.0, 50.0, 50.0, 50.0
+                l1, l2, ma3 = 50.0, 50.0, 50.0
 
             cur_date = today.replace(day=1)
 
@@ -243,8 +269,26 @@ class DbTrainerPredictor:
                 p_anio = cur_date.year
                 p_mes = cur_date.month
 
-                if (p_anio, p_mes) in exo_df.index:
-                    exo_row = exo_df.loc[(p_anio, p_mes)]
+                if (id_prod, p_mes) in seasonality_df.index:
+                    l12 = float(seasonality_df.loc[(id_prod, p_mes), "avg_mes"])
+                else:
+                    l12 = base_units
+
+                if (p_anio, p_mes) in exo_exact_df.index:
+                    exo_row = exo_exact_df.loc[(p_anio, p_mes)]
+                    if isinstance(exo_row, pd.DataFrame):
+                        exo_row = exo_row.iloc[0]
+                    t_max = float(exo_row["temp_max_promedio"])
+                    t_med = float(exo_row["temp_media_promedio"])
+                    precip = float(exo_row["precipitacion_mm"])
+                    ipc_ind = float(exo_row["ipc_indice"])
+                    ipc_var = float(exo_row["ipc_var_interanual"])
+                    tc_usd = float(exo_row["tipo_cambio_pyg_usd"])
+                    n_feriados = float(exo_row["cantidad_feriados"])
+                    has_festivo = float(exo_row["tiene_festivo_comercial"])
+
+                elif p_mes in exo_month_df.index:
+                    exo_row = exo_month_df.loc[p_mes]
                     if isinstance(exo_row, pd.DataFrame):
                         exo_row = exo_row.iloc[0]
                     t_max = float(exo_row["temp_max_promedio"])
@@ -270,7 +314,7 @@ class DbTrainerPredictor:
                 pred_raw = float(model.predict(feature_vector)[0])
 
                 if pred_raw <= 0:
-                    pred_unidades = max(1.0, round(base_units * (1.0 + (has_festivo * 0.15) - (precip * 0.0005)), 2))
+                    pred_unidades = max(1.0, round(l12 * (1.0 + (has_festivo * 0.15) - (precip * 0.0005)), 2))
                 else:
                     pred_unidades = round(pred_raw, 2)
 
@@ -317,7 +361,7 @@ class DbTrainerPredictor:
                 for i in range(0, len(proyecciones), batch_size):
                     batch = proyecciones[i:i + batch_size]
                     conn.execute(sql_pred, batch)
-            print(f"[OK] {len(proyecciones)} predicciones dinámicas insertadas en la tabla predicciones.")
+            print(f"[OK] {len(proyecciones)} predicciones dinámicas con estacionalidad insertadas en la tabla predicciones.")
             return len(proyecciones)
         except Exception as e:
             print(f"[ERROR] Falló la inserción de predicciones en MySQL: {e}")
