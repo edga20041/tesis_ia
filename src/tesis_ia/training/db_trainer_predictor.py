@@ -122,7 +122,7 @@ class DbTrainerPredictor:
                 mae = VALUES(mae),
                 rmse = VALUES(rmse),
                 mape = VALUES(mape),
-                activo = 1;
+                activo = 1
         """)
 
         company_model_map: Dict[str, str] = {}
@@ -219,7 +219,7 @@ class DbTrainerPredictor:
                     "intervalo_confianza_sup": sup
                 })
 
-        sql_delete = text("DELETE FROM predicciones;")
+        sql_delete = text("DELETE FROM predicciones")
         sql_pred = text("""
             INSERT INTO predicciones (
                 id, id_empresa, id_producto, id_modelo, anio, mes,
@@ -229,19 +229,21 @@ class DbTrainerPredictor:
                 :id, :id_empresa, :id_producto, :id_modelo, :anio, :mes,
                 :unidades_predichas, :monto_predicho, :intervalo_confianza_inf,
                 :intervalo_confianza_sup, NOW()
-            );
+            )
         """)
 
         try:
             with self.engine.begin() as conn:
                 conn.execute(sql_delete)
-                for row in proyecciones:
-                    conn.execute(sql_pred, row)
+                batch_size = 5000
+                for i in range(0, len(proyecciones), batch_size):
+                    batch = proyecciones[i:i + batch_size]
+                    conn.execute(sql_pred, batch)
             print(f"[OK] {len(proyecciones)} predicciones insertadas/actualizadas en la tabla predicciones.")
             return len(proyecciones)
         except Exception as e:
             print(f"[ERROR] Falló la inserción de predicciones en MySQL: {e}")
-            return 0
+            raise e
 
 
 if __name__ == "__main__":
