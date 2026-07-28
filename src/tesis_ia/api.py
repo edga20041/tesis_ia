@@ -5,13 +5,13 @@ from __future__ import annotations
 import datetime
 from typing import Dict, Any, Optional
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from tesis_ia.data.exogenous_pipeline import ExogenousPipeline
 from tesis_ia.data.feature_calculator import FeatureCalculator
 from tesis_ia.training.db_trainer_predictor import DbTrainerPredictor
-from tesis_ia.utils.db_connector import test_connection, get_engine
+from tesis_ia.utils.db_connector import test_connection
 
 app = FastAPI(
     title="Plataforma de Inteligencia Predictiva B2B - API de IA",
@@ -56,28 +56,23 @@ def _ejecutar_pipeline_cierre(anio: int, mes: int, id_empresa: Optional[str]) ->
 
     feat_calc = FeatureCalculator()
     feat_calc.consolidate_weekly_sales(anio, mes)
-    feat_ok = feat_calc.compute_features_month(anio, mes)
+    feat_calc.compute_features_month(anio, mes)
 
     trainer = DbTrainerPredictor()
     model, metrics, desde, hasta = trainer.train_and_evaluate()
 
-    # Si no se envió id_empresa, obtener la primera disponible en BD
-    if not id_empresa:
-        from sqlalchemy import text
-        with trainer.engine.connect() as conn:
-            id_empresa = conn.execute(text("SELECT id FROM empresa LIMIT 1")).scalar() or "empresa_default"
-
     version_name = f"baseline_linear_{anio}_{mes:02d}"
-    model_id = trainer.save_model_version(id_empresa, version_name, metrics, desde, hasta)
+    company_model_map = trainer.save_model_version(version_name, metrics, desde, hasta, id_empresa)
 
-    num_preds = trainer.generate_and_save_predictions(model, model_id)
+    num_preds = trainer.generate_and_save_predictions(model, company_model_map)
+    first_model_id = next(iter(company_model_map.values()), "model_id")
 
     return {
         "status": "success",
         "message": f"Pipeline de cierre mensual para {anio}-{mes:02d} ejecutado correctamente.",
         "anio": anio,
         "mes": mes,
-        "id_modelo": model_id,
+        "id_modelo": first_model_id,
         "predicciones_generadas": num_preds,
     }
 

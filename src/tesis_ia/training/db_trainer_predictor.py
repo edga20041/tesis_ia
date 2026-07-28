@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import uuid
 import datetime
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -104,10 +104,9 @@ class DbTrainerPredictor:
         print(f"[TRAIN] Regresión Lineal entrenada. MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%")
         return model, metrics, fecha_desde, fecha_hasta
 
-    def save_model_version(self, id_empresa: str, version: str, metrics: Dict[str, float],
-                          desde: str, hasta: str) -> str:
-        model_id = str(uuid.uuid4())
-
+    def save_model_version(self, version: str, metrics: Dict[str, float],
+                           desde: str, hasta: str, id_empresa: Optional[str] = None) -> Dict[str, str]:
+        sql_get_empresas = text("SELECT id FROM empresa WHERE activo = 1")
         sql_deactivate = text("UPDATE modelos_versiones SET activo = 0 WHERE id_empresa = :id_empresa")
 
         sql_insert = text("""
@@ -126,23 +125,37 @@ class DbTrainerPredictor:
                 activo = 1;
         """)
 
-        with self.engine.begin() as conn:
-            conn.execute(sql_deactivate, {"id_empresa": id_empresa})
-            conn.execute(sql_insert, {
-                "id": model_id,
-                "id_empresa": id_empresa,
-                "version": version,
-                "desde": desde,
-                "hasta": hasta,
-                "mae": metrics["mae"],
-                "rmse": metrics["rmse"],
-                "mape": metrics["mape"],
-                "hiperparametros": json.dumps({"family": "LinearRegression", "algorithm": "scikit-learn"})
-            })
-        print(f"[OK] Modelo '{version}' guardado como ACTIVO para empresa {id_empresa}.")
-        return model_id
+        company_model_map: Dict[str, str] = {}
 
-    def generate_and_save_predictions(self, model: LinearRegression, id_modelo: str) -> int:
+        with self.engine.begin() as conn:
+            if id_empresa:
+                empresas = [id_empresa]
+            else:
+                empresas = [row[0] for row in conn.execute(sql_get_empresas).fetchall()]
+                if not empresas:
+                    empresas = [str(uuid.uuid4())]
+
+            for emp_id in empresas:
+                model_id = str(uuid.uuid4())
+                company_model_map[emp_id] = model_id
+                conn.execute(sql_deactivate, {"id_empresa": emp_id})
+                conn.execute(sql_insert, {
+                    "id": model_id,
+                    "id_empresa": emp_id,
+                    "version": version,
+                    "desde": desde,
+                    "hasta": hasta,
+                    "mae": metrics["mae"],
+                    "rmse": metrics["rmse"],
+                    "mape": metrics["mape"],
+                    "hiperparametros": json.dumps({"family": "LinearRegression", "algorithm": "scikit-learn"})
+                })
+
+        print(f"[OK] Modelo '{version}' guardado como ACTIVO para {len(company_model_map)} empresa(s).")
+        return company_model_map
+
+    def generate_and_save_predictions(self, model: LinearRegression,
+                                       company_model_map: Union[Dict[str, str], str]) -> int:
         query_prods = """
             SELECT DISTINCT 
                 p.id AS id_producto,
@@ -161,10 +174,17 @@ class DbTrainerPredictor:
         today = datetime.date.today()
         proyecciones = []
 
+        default_model_id = company_model_map if isinstance(company_model_map, str) else next(iter(company_model_map.values()), str(uuid.uuid4()))
+
         for _, prod in prods_df.iterrows():
             id_prod = prod["id_producto"]
             id_emp = prod["id_empresa"]
             val_unitario = float(prod["valor_unitario"] or 10000.0)
+
+            if isinstance(company_model_map, dict):
+                id_mod = company_model_map.get(id_emp, default_model_id)
+            else:
+                id_mod = default_model_id
 
             cur_date = today.replace(day=1)
             for i in range(1, 13):
@@ -190,7 +210,7 @@ class DbTrainerPredictor:
                     "id": pred_id,
                     "id_empresa": id_emp,
                     "id_producto": id_prod,
-                    "id_modelo": id_modelo,
+                    "id_modelo": id_mod,
                     "anio": p_anio,
                     "mes": p_mes,
                     "unidades_predichas": pred_unidades,
@@ -232,7 +252,5 @@ class DbTrainerPredictor:
 if __name__ == "__main__":
     runner = DbTrainerPredictor()
     model, metrics, desde, hasta = runner.train_and_evaluate()
-    with runner.engine.connect() as conn:
-        emp_id = conn.execute(text("SELECT id FROM empresa LIMIT 1")).scalar() or str(uuid.uuid4())
-    model_id = runner.save_model_version(emp_id, "baseline_linear_v1", metrics, desde, hasta)
-    runner.generate_and_save_predictions(model, model_id)
+    company_model_map = runner.save_model_version("baseline_linear_v1", metrics, desde, hasta)
+    runner.generate_and_save_predictions(model, company_model_map)
