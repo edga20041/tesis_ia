@@ -78,7 +78,7 @@ class ExogenousPipeline:
         cantidad_feriados = len(feriados_mes)
         nombre_festivo = ", ".join(filter(None, nombres_feriados)) if nombres_feriados else None
 
-        tiene_festivo_comercial = 1 if mes in [5, 6, 12] else 0  # Mayo (Día Madre), Junio (San Juan), Diciembre (Navidad)
+        tiene_festivo_comercial = 1 if mes in [5, 6, 12] else 0
         quincena_aguinaldo = 1 if mes == 12 else 0
         inicio_ciclo_escolar = 1 if mes == 2 else 0
         ciclo_cobro_mensual = 1
@@ -93,8 +93,6 @@ class ExogenousPipeline:
         }
 
     def fetch_macro_month(self, anio: int, mes: int) -> Dict[str, Any]:
-        # Valores de estimación/base para Paraguay (pueden ser actualizados desde API externa)
-        # IPC base 2021=100 con inflación anual aproximada ~4.5%
         meses_desde_base = (anio - 2021) * 12 + (mes - 1)
         ipc_indice = round(100.0 * (1 + 0.045 / 12) ** meses_desde_base, 2)
         ipc_var_interanual = 4.5
@@ -110,7 +108,7 @@ class ExogenousPipeline:
             "inversion_ext_usd": 25000000.00,
         }
 
-    def sync_month(self, anio: int, mes: int) -> bool:
+    def sync_month(self, anio: int, mes: int) -> Tuple[bool, Dict[str, Any]]:
         clima = self.fetch_weather_month(anio, mes)
         cal = self.fetch_calendar_month(anio, mes)
         macro = self.fetch_macro_month(anio, mes)
@@ -159,23 +157,38 @@ class ExogenousPipeline:
                 inversion_ext_usd = VALUES(inversion_ext_usd);
         """)
 
+        details = {
+            "clima": clima,
+            "macro": {
+                "ipc_indice": macro["ipc_indice"],
+                "ipc_var_interanual": macro["ipc_var_interanual"],
+                "tipo_cambio_pyg_usd": macro["tipo_cambio_pyg_usd"]
+            },
+            "calendario": {
+                "cantidad_feriados": cal["cantidad_feriados"],
+                "tiene_festivo_comercial": cal["tiene_festivo_comercial"],
+                "nombre_festivo": cal["nombre_festivo"]
+            }
+        }
+
         try:
             with self.engine.begin() as conn:
                 conn.execute(sql_clima, {"anio": anio, "mes": mes, **clima})
                 conn.execute(sql_cal, {"anio": anio, "mes": mes, **cal})
                 conn.execute(sql_macro, {"anio": anio, "mes": mes, **macro})
-            print(f"[OK] Variables exógenas sincronizadas exitosamente en MySQL para {anio}-{mes:02d}.")
-            return True
+            print(f"[OK] Variables exógenas sincronizadas en MySQL para {anio}-{mes:02d}: {details}")
+            return True, details
         except Exception as e:
             print(f"[ERROR] Falló la sincronización de variables exógenas para {anio}-{mes}: {e}")
-            return False
+            return False, details
 
     def sync_range(self, start_anio: int, start_mes: int, end_anio: int, end_mes: int) -> int:
         """Sincroniza un rango de meses de forma secuencial."""
         count = 0
         cur_year, cur_month = start_anio, start_mes
         while (cur_year < end_anio) or (cur_year == end_anio and cur_month <= end_mes):
-            if self.sync_month(cur_year, cur_month):
+            ok, _ = self.sync_month(cur_year, cur_month)
+            if ok:
                 count += 1
             cur_month += 1
             if cur_month > 12:

@@ -31,6 +31,7 @@ class PipelineResponse(BaseModel):
     message: str
     anio: int
     mes: int
+    exogenas_sincronizadas: Optional[Dict[str, Any]] = None
     id_modelo: Optional[str] = None
     predicciones_generadas: int = 0
 
@@ -50,7 +51,7 @@ def _ejecutar_pipeline_cierre(anio: int, mes: int, id_empresa: Optional[str]) ->
     print(f"\n=== Iniciando Pipeline de Cierre Mensual para {anio}-{mes:02d} ===")
 
     exo_pipe = ExogenousPipeline()
-    exo_ok = exo_pipe.sync_month(anio, mes)
+    exo_ok, exo_details = exo_pipe.sync_month(anio, mes)
     if not exo_ok:
         print("[WARN] Falló la ingesta exógena, continuando con valores previos.")
 
@@ -72,6 +73,7 @@ def _ejecutar_pipeline_cierre(anio: int, mes: int, id_empresa: Optional[str]) ->
         "message": f"Pipeline de cierre mensual para {anio}-{mes:02d} ejecutado correctamente.",
         "anio": anio,
         "mes": mes,
+        "exogenas_sincronizadas": exo_details,
         "id_modelo": first_model_id,
         "predicciones_generadas": num_preds,
     }
