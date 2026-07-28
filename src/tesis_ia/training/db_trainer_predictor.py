@@ -219,6 +219,7 @@ class DbTrainerPredictor:
                     "intervalo_confianza_sup": sup
                 })
 
+        sql_delete = text("DELETE FROM predicciones;")
         sql_pred = text("""
             INSERT INTO predicciones (
                 id, id_empresa, id_producto, id_modelo, anio, mes,
@@ -228,18 +229,12 @@ class DbTrainerPredictor:
                 :id, :id_empresa, :id_producto, :id_modelo, :anio, :mes,
                 :unidades_predichas, :monto_predicho, :intervalo_confianza_inf,
                 :intervalo_confianza_sup, NOW()
-            )
-            ON DUPLICATE KEY UPDATE
-                id_modelo = VALUES(id_modelo),
-                unidades_predichas = VALUES(unidades_predichas),
-                monto_predicho = VALUES(monto_predicho),
-                intervalo_confianza_inf = VALUES(intervalo_confianza_inf),
-                intervalo_confianza_sup = VALUES(intervalo_confianza_sup),
-                fecha_generacion = NOW();
+            );
         """)
 
         try:
             with self.engine.begin() as conn:
+                conn.execute(sql_delete)
                 for row in proyecciones:
                     conn.execute(sql_pred, row)
             print(f"[OK] {len(proyecciones)} predicciones insertadas/actualizadas en la tabla predicciones.")
