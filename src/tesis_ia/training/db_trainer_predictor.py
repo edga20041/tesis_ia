@@ -69,12 +69,18 @@ class DbTrainerPredictor:
 
         df[self.FEATURE_COLS] = df[self.FEATURE_COLS].fillna(0)
 
-        train_mask = df["anio"] < 2025
-        test_mask = df["anio"] == 2025
+        df["periodo_date"] = pd.to_datetime(df["anio"].astype(str) + "-" + df["mes"].astype(str) + "-01")
+        max_period_date = df["periodo_date"].max()
+
+        cutoff_date = max_period_date - pd.DateOffset(months=12)
+
+        train_mask = df["periodo_date"] < cutoff_date
+        test_mask = df["periodo_date"] >= cutoff_date
 
         if not train_mask.any():
-            train_mask = df["anio"] <= df["anio"].max() - 1
-            test_mask = df["anio"] == df["anio"].max()
+            cutoff_date = max_period_date - pd.DateOffset(months=6)
+            train_mask = df["periodo_date"] < cutoff_date
+            test_mask = df["periodo_date"] >= cutoff_date
 
         X_train = df.loc[train_mask, self.FEATURE_COLS]
         y_train = df.loc[train_mask, "unidades_vendidas"]
@@ -101,7 +107,7 @@ class DbTrainerPredictor:
         fecha_hasta = f"{df['anio'].max()}-12-31"
 
         metrics = {"mae": mae, "rmse": rmse, "mape": mape}
-        print(f"[TRAIN] Regresión Lineal entrenada. MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%")
+        print(f"[TRAIN] Regresión Lineal entrenada (Ventana Móvil: Train < {cutoff_date.strftime('%Y-%m')}, Validation Test >= {cutoff_date.strftime('%Y-%m')}). MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%")
         return model, metrics, fecha_desde, fecha_hasta
 
     def save_model_version(self, version: str, metrics: Dict[str, float],
@@ -167,8 +173,37 @@ class DbTrainerPredictor:
             FROM productos p
             JOIN marcas m ON p.id_marca = m.id
         """
+        query_stats = """
+            SELECT 
+                id_producto,
+                AVG(unidades_vendidas) AS avg_unidades,
+                AVG(COALESCE(lag_1, unidades_vendidas)) AS last_lag_1,
+                AVG(COALESCE(lag_2, unidades_vendidas)) AS last_lag_2,
+                AVG(COALESCE(lag_12, unidades_vendidas)) AS last_lag_12,
+                AVG(COALESCE(ma_3m, unidades_vendidas)) AS last_ma_3m
+            FROM ventas_mensuales
+            GROUP BY id_producto
+        """
+        query_exo = """
+            SELECT 
+                vc.anio, vc.mes,
+                COALESCE(vc.temp_max_promedio, 30.0) AS temp_max_promedio,
+                COALESCE(vc.temp_media_promedio, 25.0) AS temp_media_promedio,
+                COALESCE(vc.precipitacion_mm, 100.0) AS precipitacion_mm,
+                COALESCE(vmac.ipc_indice, 100.0) AS ipc_indice,
+                COALESCE(vmac.ipc_var_interanual, 4.5) AS ipc_var_interanual,
+                COALESCE(vmac.tipo_cambio_pyg_usd, 7200.0) AS tipo_cambio_pyg_usd,
+                COALESCE(vcal.cantidad_feriados, 0) AS cantidad_feriados,
+                COALESCE(vcal.tiene_festivo_comercial, 0) AS tiene_festivo_comercial
+            FROM variables_climaticas vc
+            LEFT JOIN variables_macroeconomicas vmac ON vc.anio = vmac.anio AND vc.mes = vmac.mes
+            LEFT JOIN variables_calendario vcal ON vc.anio = vcal.anio AND vc.mes = vcal.mes
+        """
+
         with self.engine.connect() as conn:
             prods_df = pd.read_sql(query_prods, conn)
+            stats_df = pd.read_sql(query_stats, conn).set_index("id_producto")
+            exo_df = pd.read_sql(query_exo, conn).set_index(["anio", "mes"])
 
         if prods_df.empty:
             print("[WARN] No hay productos para generar predicciones.")
@@ -184,12 +219,21 @@ class DbTrainerPredictor:
             id_emp = prod["id_empresa"]
             val_unitario = float(prod["valor_unitario"] or 10000.0)
 
-            if isinstance(company_model_map, dict):
-                id_mod = company_model_map.get(id_emp, default_model_id)
+            id_mod = company_model_map.get(id_emp, default_model_id) if isinstance(company_model_map, dict) else default_model_id
+
+            if id_prod in stats_df.index:
+                p_stat = stats_df.loc[id_prod]
+                base_units = float(p_stat["avg_unidades"] or 50.0)
+                l1 = float(p_stat["last_lag_1"] or base_units)
+                l2 = float(p_stat["last_lag_2"] or base_units)
+                l12 = float(p_stat["last_lag_12"] or base_units)
+                ma3 = float(p_stat["last_ma_3m"] or base_units)
             else:
-                id_mod = default_model_id
+                base_units = 50.0
+                l1, l2, l12, ma3 = 50.0, 50.0, 50.0, 50.0
 
             cur_date = today.replace(day=1)
+
             for i in range(1, 13):
                 if cur_date.month == 12:
                     cur_date = datetime.date(cur_date.year + 1, 1, 1)
@@ -199,11 +243,38 @@ class DbTrainerPredictor:
                 p_anio = cur_date.year
                 p_mes = cur_date.month
 
-                sample_features = np.array([[10, 12, 15, 11, 32.0, 26.0, 80.0, 110.0, 4.5, 7300.0, 1, 0]])
-                pred_unidades = float(model.predict(sample_features)[0])
-                pred_unidades = max(5.0, round(pred_unidades, 2))
-                monto_predicho = round(pred_unidades * val_unitario, 2)
+                if (p_anio, p_mes) in exo_df.index:
+                    exo_row = exo_df.loc[(p_anio, p_mes)]
+                    if isinstance(exo_row, pd.DataFrame):
+                        exo_row = exo_row.iloc[0]
+                    t_max = float(exo_row["temp_max_promedio"])
+                    t_med = float(exo_row["temp_media_promedio"])
+                    precip = float(exo_row["precipitacion_mm"])
+                    ipc_ind = float(exo_row["ipc_indice"])
+                    ipc_var = float(exo_row["ipc_var_interanual"])
+                    tc_usd = float(exo_row["tipo_cambio_pyg_usd"])
+                    n_feriados = float(exo_row["cantidad_feriados"])
+                    has_festivo = float(exo_row["tiene_festivo_comercial"])
+                else:
+                    t_max, t_med, precip = 30.0, 25.0, 100.0
+                    ipc_ind, ipc_var, tc_usd = 100.0, 4.5, 7500.0
+                    n_feriados, has_festivo = 0.0, 0.0
 
+                feature_vector = np.array([[
+                    l1, l2, l12, ma3,
+                    t_max, t_med, precip,
+                    ipc_ind, ipc_var, tc_usd,
+                    n_feriados, has_festivo
+                ]])
+
+                pred_raw = float(model.predict(feature_vector)[0])
+
+                if pred_raw <= 0:
+                    pred_unidades = max(1.0, round(base_units * (1.0 + (has_festivo * 0.15) - (precip * 0.0005)), 2))
+                else:
+                    pred_unidades = round(pred_raw, 2)
+
+                monto_predicho = round(pred_unidades * val_unitario, 2)
                 inf = round(pred_unidades * 0.85, 2)
                 sup = round(pred_unidades * 1.15, 2)
 
@@ -221,6 +292,10 @@ class DbTrainerPredictor:
                     "intervalo_confianza_inf": inf,
                     "intervalo_confianza_sup": sup
                 })
+
+                l2 = l1
+                l1 = pred_unidades
+                ma3 = round((l1 + l2 + ma3) / 3.0, 2)
 
         sql_delete = text("DELETE FROM predicciones")
         sql_pred = text("""
@@ -242,7 +317,7 @@ class DbTrainerPredictor:
                 for i in range(0, len(proyecciones), batch_size):
                     batch = proyecciones[i:i + batch_size]
                     conn.execute(sql_pred, batch)
-            print(f"[OK] {len(proyecciones)} predicciones insertadas/actualizadas en la tabla predicciones.")
+            print(f"[OK] {len(proyecciones)} predicciones dinámicas insertadas en la tabla predicciones.")
             return len(proyecciones)
         except Exception as e:
             print(f"[ERROR] Falló la inserción de predicciones en MySQL: {e}")
