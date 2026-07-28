@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  tesis-ia:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tesis-ia-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=${DB_HOST:-mysql-db}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_NAME=${DB_NAME:-tesis}
+      - DB_USER=${DB_USER:-root}
+      - DB_PASSWORD=${DB_PASSWORD:-root}
+    restart: always
