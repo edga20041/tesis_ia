@@ -11,14 +11,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements-dev.txt setup.py README.md ./
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -e .
-
 COPY src/ ./src/
 COPY config/ ./config/
 COPY scripts/ ./scripts/
 COPY .env.example ./.env.example
+
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -e .
 
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
