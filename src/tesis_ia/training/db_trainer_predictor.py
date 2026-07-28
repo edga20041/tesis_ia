@@ -137,7 +137,6 @@ class DbTrainerPredictor:
 
             for emp_id in empresas:
                 model_id = str(uuid.uuid4())
-                company_model_map[emp_id] = model_id
                 conn.execute(sql_deactivate, {"id_empresa": emp_id})
                 conn.execute(sql_insert, {
                     "id": model_id,
@@ -150,6 +149,10 @@ class DbTrainerPredictor:
                     "mape": metrics["mape"],
                     "hiperparametros": json.dumps({"family": "LinearRegression", "algorithm": "scikit-learn"})
                 })
+
+            rows = conn.execute(text("SELECT id_empresa, id FROM modelos_versiones WHERE activo = 1")).fetchall()
+            for r_emp, r_id in rows:
+                company_model_map[r_emp] = r_id
 
         print(f"[OK] Modelo '{version}' guardado como ACTIVO para {len(company_model_map)} empresa(s).")
         return company_model_map
