@@ -179,7 +179,9 @@ class DbTrainerPredictor:
                 AVG(unidades_vendidas) AS avg_unidades,
                 AVG(COALESCE(lag_1, unidades_vendidas)) AS last_lag_1,
                 AVG(COALESCE(lag_2, unidades_vendidas)) AS last_lag_2,
-                AVG(COALESCE(ma_3m, unidades_vendidas)) AS last_ma_3m
+                AVG(COALESCE(ma_3m, unidades_vendidas)) AS last_ma_3m,
+                MAX(anio) AS last_anio,
+                MAX(mes) AS last_mes
             FROM ventas_mensuales
             GROUP BY id_producto
         """
@@ -236,9 +238,7 @@ class DbTrainerPredictor:
             print("[WARN] No hay productos para generar predicciones.")
             return 0
 
-        today = datetime.date.today()
         proyecciones = []
-
         default_model_id = company_model_map if isinstance(company_model_map, str) else next(iter(company_model_map.values()), str(uuid.uuid4()))
 
         for _, prod in prods_df.iterrows():
@@ -254,11 +254,14 @@ class DbTrainerPredictor:
                 l1 = float(p_stat["last_lag_1"] or base_units)
                 l2 = float(p_stat["last_lag_2"] or base_units)
                 ma3 = float(p_stat["last_ma_3m"] or base_units)
+                start_year = int(p_stat["last_anio"]) if pd.notnull(p_stat["last_anio"]) else 2025
+                start_month = int(p_stat["last_mes"]) if pd.notnull(p_stat["last_mes"]) else 12
             else:
                 base_units = 50.0
                 l1, l2, ma3 = 50.0, 50.0, 50.0
+                start_year, start_month = 2025, 12
 
-            cur_date = today.replace(day=1)
+            cur_date = datetime.date(start_year, start_month, 1)
 
             for i in range(1, 13):
                 if cur_date.month == 12:
