@@ -180,8 +180,8 @@ class DbTrainerPredictor:
                 AVG(COALESCE(lag_1, unidades_vendidas)) AS last_lag_1,
                 AVG(COALESCE(lag_2, unidades_vendidas)) AS last_lag_2,
                 AVG(COALESCE(ma_3m, unidades_vendidas)) AS last_ma_3m,
-                MAX(anio) AS last_anio,
-                MAX(mes) AS last_mes
+                SUBSTRING_INDEX(MAX(CONCAT(anio, '-', LPAD(mes, 2, '0'))), '-', 1) AS last_anio,
+                SUBSTRING_INDEX(MAX(CONCAT(anio, '-', LPAD(mes, 2, '0'))), '-', -1) AS last_mes
             FROM ventas_mensuales
             GROUP BY id_producto
         """
