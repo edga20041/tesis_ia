@@ -373,6 +373,146 @@ class DbTrainerPredictor:
             print(f"[ERROR] Falló la inserción de predicciones en MySQL: {e}")
             raise e
 
+    def simulate_product_scenarios(self, id_producto: str, precio_pct: float = 0.0,
+                                   usd_pct: float = 0.0, ipc_pct: float = 0.0) -> List[Dict[str, Any]]:
+        model, metrics, _, _ = self.train_and_evaluate()
+        id_clean = id_producto.strip().lower()
+
+        query_prod = text("""
+            SELECT 
+                p.id AS id_producto,
+                p.valor_unitario,
+                m.id_empresa
+            FROM productos p
+            JOIN marcas m ON p.id_marca = m.id
+            WHERE LOWER(p.id) = :id_clean
+            LIMIT 1
+        """)
+
+        query_stat = text("""
+            SELECT 
+                AVG(unidades_vendidas) AS avg_unidades,
+                AVG(COALESCE(lag_1, unidades_vendidas)) AS last_lag_1,
+                AVG(COALESCE(lag_2, unidades_vendidas)) AS last_lag_2,
+                AVG(COALESCE(ma_3m, unidades_vendidas)) AS last_ma_3m,
+                SUBSTRING_INDEX(MAX(CONCAT(anio, '-', LPAD(mes, 2, '0'))), '-', 1) AS last_anio,
+                SUBSTRING_INDEX(MAX(CONCAT(anio, '-', LPAD(mes, 2, '0'))), '-', -1) AS last_mes
+            FROM ventas_mensuales
+            WHERE LOWER(id_producto) = :id_clean
+        """)
+
+        query_seasonality = text("""
+            SELECT mes, AVG(unidades_vendidas) AS avg_mes
+            FROM ventas_mensuales
+            WHERE LOWER(id_producto) = :id_clean
+            GROUP BY mes
+        """)
+
+        query_exo = text("""
+            SELECT 
+                vc.mes,
+                AVG(COALESCE(vc.temp_max_promedio, 30.0)) AS temp_max_promedio,
+                AVG(COALESCE(vc.temp_media_promedio, 25.0)) AS temp_media_promedio,
+                AVG(COALESCE(vc.precipitacion_mm, 100.0)) AS precipitacion_mm,
+                MAX(COALESCE(vmac.ipc_indice, 100.0)) AS ipc_indice,
+                AVG(COALESCE(vmac.ipc_var_interanual, 4.5)) AS ipc_var_interanual,
+                MAX(COALESCE(vmac.tipo_cambio_pyg_usd, 7200.0)) AS tipo_cambio_pyg_usd,
+                ROUND(AVG(COALESCE(vcal.cantidad_feriados, 0))) AS cantidad_feriados,
+                MAX(COALESCE(vcal.tiene_festivo_comercial, 0)) AS tiene_festivo_comercial
+            FROM variables_climaticas vc
+            LEFT JOIN variables_macroeconomicas vmac ON vc.anio = vmac.anio AND vc.mes = vmac.mes
+            LEFT JOIN variables_calendario vcal ON vc.anio = vcal.anio AND vc.mes = vcal.mes
+            GROUP BY vc.mes
+        """)
+
+        with self.engine.connect() as conn:
+            prod_row = conn.execute(query_prod, {"id_clean": id_clean}).fetchone()
+            stat_row = conn.execute(query_stat, {"id_clean": id_clean}).fetchone()
+            seas_rows = conn.execute(query_seasonality, {"id_clean": id_clean}).fetchall()
+            exo_rows = conn.execute(query_exo).fetchall()
+
+        if not prod_row or not stat_row:
+            raise ValueError(f"No se encontró el producto con ID '{id_producto}' en la base de datos.")
+
+        base_val_unitario = float(prod_row[1] or 10000.0)
+        sim_val_unitario = base_val_unitario * (1.0 + (precio_pct / 100.0))
+
+        base_units = float(stat_row[0] if stat_row[0] is not None else 50.0)
+        l1 = float(stat_row[1] if stat_row[1] is not None else base_units)
+        l2 = float(stat_row[2] if stat_row[2] is not None else base_units)
+        ma3 = float(stat_row[3] if stat_row[3] is not None else base_units)
+
+        start_year = int(stat_row[4]) if stat_row[4] is not None else 2025
+        start_month = int(stat_row[5]) if stat_row[5] is not None else 12
+
+        seasonality_map = {row[0]: float(row[1]) for row in seas_rows}
+        exo_map = {row[0]: row for row in exo_rows}
+
+        cur_date = datetime.date(start_year, start_month, 1)
+        simulados = []
+
+        price_elasticity_factor = 1.0 - (0.5 * (precio_pct / 100.0))
+
+        for _ in range(1, 13):
+            if cur_date.month == 12:
+                cur_date = datetime.date(cur_date.year + 1, 1, 1)
+            else:
+                cur_date = datetime.date(cur_date.year, cur_date.month + 1, 1)
+
+            p_anio = cur_date.year
+            p_mes = cur_date.month
+
+            l12 = seasonality_map.get(p_mes, base_units)
+
+            if p_mes in exo_map:
+                e = exo_map[p_mes]
+                t_max = float(e[1])
+                t_med = float(e[2])
+                precip = float(e[3])
+                ipc_ind = float(e[4]) * (1.0 + (ipc_pct / 100.0))
+                ipc_var = float(e[5]) * (1.0 + (ipc_pct / 100.0))
+                tc_usd = float(e[6]) * (1.0 + (usd_pct / 100.0))
+                n_feriados = float(e[7])
+                has_festivo = float(e[8])
+            else:
+                t_max, t_med, precip = 30.0, 25.0, 100.0
+                ipc_ind = 100.0 * (1.0 + (ipc_pct / 100.0))
+                ipc_var = 4.5 * (1.0 + (ipc_pct / 100.0))
+                tc_usd = 7200.0 * (1.0 + (usd_pct / 100.0))
+                n_feriados, has_festivo = 0.0, 0.0
+
+            feature_vector = np.array([[
+                l1 * price_elasticity_factor,
+                l2 * price_elasticity_factor,
+                l12 * price_elasticity_factor,
+                ma3 * price_elasticity_factor,
+                t_max, t_med, precip,
+                ipc_ind, ipc_var, tc_usd,
+                n_feriados, has_festivo
+            ]])
+
+            pred_raw = float(model.predict(feature_vector)[0])
+            if pred_raw <= 0:
+                pred_unidades = max(1.0, round(l12 * price_elasticity_factor, 2))
+            else:
+                pred_unidades = round(pred_raw, 2)
+
+            monto_simulado = round(pred_unidades * sim_val_unitario, 2)
+
+            simulados.append({
+                "anio": p_anio,
+                "mes": p_mes,
+                "unidades_simuladas": pred_unidades,
+                "monto_simulado": monto_simulado,
+                "precio_unitario_simulado": round(sim_val_unitario, 2)
+            })
+
+            l2 = l1
+            l1 = pred_unidades
+            ma3 = round((l1 + l2 + ma3) / 3.0, 2)
+
+        return simulados
+
 
 if __name__ == "__main__":
     runner = DbTrainerPredictor()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -15,7 +15,7 @@ from tesis_ia.utils.db_connector import test_connection
 
 app = FastAPI(
     title="Plataforma de Inteligencia Predictiva B2B - API de IA",
-    description="Microservicio de entrenamiento, ingesta exógena y predicciones a 12 meses.",
+    description="Microservicio de entrenamiento, ingesta exógena, predicciones y simulador de escenarios a 12 meses.",
     version="1.0.0",
 )
 
@@ -34,6 +34,20 @@ class PipelineResponse(BaseModel):
     exogenas_sincronizadas: Optional[Dict[str, Any]] = None
     id_modelo: Optional[str] = None
     predicciones_generadas: int = 0
+
+
+class SimulationRequest(BaseModel):
+    id_producto: str = Field(..., description="ID o SKU del producto a simular")
+    precio_pct: float = Field(0.0, description="Variación porcentual del precio (-30 a +30)")
+    usd_pct: float = Field(0.0, description="Variación porcentual del Dólar USD (-20 a +20)")
+    ipc_pct: float = Field(0.0, description="Variación porcentual del IPC Inflación (-10 a +20)")
+
+
+class SimulationResponse(BaseModel):
+    status: str
+    id_producto: str
+    variaciones_aplicadas: Dict[str, float]
+    simulacion: List[Dict[str, Any]]
 
 
 @app.get("/health")
@@ -86,6 +100,30 @@ def run_cierre_mensual(req: CierreMensualRequest) -> PipelineResponse:
         return PipelineResponse(**res)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error durante el cierre mensual: {str(e)}")
+
+
+@app.post("/simulation/predict", response_model=SimulationResponse)
+def run_simulation(req: SimulationRequest) -> SimulationResponse:
+    try:
+        trainer = DbTrainerPredictor()
+        simulados = trainer.simulate_product_scenarios(
+            id_producto=req.id_producto,
+            precio_pct=req.precio_pct,
+            usd_pct=req.usd_pct,
+            ipc_pct=req.ipc_pct,
+        )
+        return SimulationResponse(
+            status="success",
+            id_producto=req.id_producto,
+            variaciones_aplicadas={
+                "precio_pct": req.precio_pct,
+                "usd_pct": req.usd_pct,
+                "ipc_pct": req.ipc_pct,
+            },
+            simulacion=simulados,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al ejecutar la simulación de producto: {str(e)}")
 
 
 if __name__ == "__main__":
