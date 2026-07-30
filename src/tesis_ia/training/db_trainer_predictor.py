@@ -229,8 +229,8 @@ class DbTrainerPredictor:
 
         with self.engine.connect() as conn:
             prods_df = pd.read_sql(query_prods, conn)
-            stats_df = pd.read_sql(query_stats, conn).set_index("id_producto")
-            seasonality_df = pd.read_sql(query_monthly_seasonality, conn).set_index(["id_producto", "mes"])
+            stats_df = pd.read_sql(query_stats, conn)
+            seasonality_df = pd.read_sql(query_monthly_seasonality, conn)
             exo_exact_df = pd.read_sql(query_exo_exact, conn).set_index(["anio", "mes"])
             exo_month_df = pd.read_sql(query_exo_by_month, conn).set_index("mes")
 
@@ -238,28 +238,31 @@ class DbTrainerPredictor:
             print("[WARN] No hay productos para generar predicciones.")
             return 0
 
+        prods_df["id_producto_clean"] = prods_df["id_producto"].astype(str).str.strip().str.lower()
+        stats_df["id_producto_clean"] = stats_df["id_producto"].astype(str).str.strip().str.lower()
+        seasonality_df["id_producto_clean"] = seasonality_df["id_producto"].astype(str).str.strip().str.lower()
+
+        prods_merged = prods_df.merge(stats_df, on="id_producto_clean", how="left", suffixes=("", "_stat"))
+        seasonality_map = seasonality_df.set_index(["id_producto_clean", "mes"])["avg_mes"].to_dict()
+
         proyecciones = []
         default_model_id = company_model_map if isinstance(company_model_map, str) else next(iter(company_model_map.values()), str(uuid.uuid4()))
 
-        for _, prod in prods_df.iterrows():
+        for _, prod in prods_merged.iterrows():
             id_prod = prod["id_producto"]
+            id_prod_clean = prod["id_producto_clean"]
             id_emp = prod["id_empresa"]
             val_unitario = float(prod["valor_unitario"] or 10000.0)
 
             id_mod = company_model_map.get(id_emp, default_model_id) if isinstance(company_model_map, dict) else default_model_id
 
-            if id_prod in stats_df.index:
-                p_stat = stats_df.loc[id_prod]
-                base_units = float(p_stat["avg_unidades"] or 50.0)
-                l1 = float(p_stat["last_lag_1"] or base_units)
-                l2 = float(p_stat["last_lag_2"] or base_units)
-                ma3 = float(p_stat["last_ma_3m"] or base_units)
-                start_year = int(p_stat["last_anio"]) if pd.notnull(p_stat["last_anio"]) else 2025
-                start_month = int(p_stat["last_mes"]) if pd.notnull(p_stat["last_mes"]) else 12
-            else:
-                base_units = 50.0
-                l1, l2, ma3 = 50.0, 50.0, 50.0
-                start_year, start_month = 2025, 12
+            base_units = float(prod["avg_unidades"] if pd.notnull(prod["avg_unidades"]) else 50.0)
+            l1 = float(prod["last_lag_1"] if pd.notnull(prod["last_lag_1"]) else base_units)
+            l2 = float(prod["last_lag_2"] if pd.notnull(prod["last_lag_2"]) else base_units)
+            ma3 = float(prod["last_ma_3m"] if pd.notnull(prod["last_ma_3m"]) else base_units)
+            
+            start_year = int(prod["last_anio"]) if pd.notnull(prod["last_anio"]) else 2025
+            start_month = int(prod["last_mes"]) if pd.notnull(prod["last_mes"]) else 12
 
             cur_date = datetime.date(start_year, start_month, 1)
 
@@ -272,8 +275,8 @@ class DbTrainerPredictor:
                 p_anio = cur_date.year
                 p_mes = cur_date.month
 
-                if (id_prod, p_mes) in seasonality_df.index:
-                    l12 = float(seasonality_df.loc[(id_prod, p_mes), "avg_mes"])
+                if (id_prod_clean, p_mes) in seasonality_map:
+                    l12 = float(seasonality_map[(id_prod_clean, p_mes)])
                 else:
                     l12 = base_units
 
