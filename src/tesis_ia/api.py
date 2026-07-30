@@ -50,6 +50,17 @@ class SimulationResponse(BaseModel):
     simulacion: List[Dict[str, Any]]
 
 
+@app.on_event("startup")
+def startup_event():
+    try:
+        print("[STARTUP] Precargando modelo de IA en memoria RAM...")
+        trainer = DbTrainerPredictor()
+        trainer.train_and_evaluate()
+        print("[STARTUP] Modelo precargado exitosamente en RAM. Simulaciones de escenarios listas en < 50ms.")
+    except Exception as e:
+        print(f"[WARN] No se pudo precargar el modelo en startup: {e}")
+
+
 @app.get("/health")
 def health_check() -> Dict[str, Any]:
     db_ok = test_connection()

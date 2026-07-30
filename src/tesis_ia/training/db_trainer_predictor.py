@@ -15,6 +15,9 @@ from sqlalchemy import text
 
 from tesis_ia.utils.db_connector import get_engine
 
+# Variable global en memoria para caché del modelo entrenado
+_CACHED_MODEL: Optional[LinearRegression] = None
+
 
 class DbTrainerPredictor:
 
@@ -63,6 +66,7 @@ class DbTrainerPredictor:
         return df
 
     def train_and_evaluate(self) -> Tuple[LinearRegression, Dict[str, float], str, str]:
+        global _CACHED_MODEL
         df = self.load_dataset_from_db()
         if df.empty:
             raise ValueError("No hay datos en ventas_mensuales para entrenar.")
@@ -89,6 +93,9 @@ class DbTrainerPredictor:
 
         model = LinearRegression()
         model.fit(X_train, y_train)
+
+        # Guardar en memoria RAM para uso inmediato en simulaciones
+        _CACHED_MODEL = model
 
         y_pred = model.predict(X_test)
         y_pred = np.clip(y_pred, 0, None)  # No permitir ventas negativas
@@ -375,7 +382,13 @@ class DbTrainerPredictor:
 
     def simulate_product_scenarios(self, id_producto: str, precio_pct: float = 0.0,
                                    usd_pct: float = 0.0, ipc_pct: float = 0.0) -> List[Dict[str, Any]]:
-        model, metrics, _, _ = self.train_and_evaluate()
+        global _CACHED_MODEL
+        if _CACHED_MODEL is None:
+            print("[INFO] Reentrenando modelo para simulación (primera ejecución RAM)...")
+            model, metrics, _, _ = self.train_and_evaluate()
+        else:
+            model = _CACHED_MODEL
+
         id_clean = id_producto.strip().lower()
 
         query_prod = text("""
