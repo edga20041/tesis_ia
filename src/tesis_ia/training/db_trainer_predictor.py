@@ -391,14 +391,18 @@ class DbTrainerPredictor:
 
         id_clean = id_producto.strip().lower()
 
+        # El frontend identifica los productos por SKU (EAN), mientras que las
+        # tablas de ventas se indexan por el UUID interno (productos.id). Aceptamos
+        # cualquiera de los dos: matcheamos por id o por sku, y mas abajo resolvemos
+        # el UUID real para el resto de los queries.
         query_prod = text("""
-            SELECT 
+            SELECT
                 p.id AS id_producto,
                 p.valor_unitario,
                 m.id_empresa
             FROM productos p
             JOIN marcas m ON p.id_marca = m.id
-            WHERE LOWER(p.id) = :id_clean
+            WHERE LOWER(p.id) = :id_clean OR LOWER(p.sku) = :id_clean
             LIMIT 1
         """)
 
@@ -440,12 +444,17 @@ class DbTrainerPredictor:
 
         with self.engine.connect() as conn:
             prod_row = conn.execute(query_prod, {"id_clean": id_clean}).fetchone()
-            stat_row = conn.execute(query_stat, {"id_clean": id_clean}).fetchone()
-            seas_rows = conn.execute(query_seasonality, {"id_clean": id_clean}).fetchall()
-            exo_rows = conn.execute(query_exo).fetchall()
+            if not prod_row:
+                raise ValueError(f"No se encontró el producto con ID '{id_producto}' en la base de datos.")
 
-        if not prod_row or not stat_row:
-            raise ValueError(f"No se encontró el producto con ID '{id_producto}' en la base de datos.")
+            # prod_row[0] es el UUID interno real (p.id), venga el request por id o por
+            # sku. Los queries sobre ventas_mensuales SIEMPRE se filtran por ese UUID,
+            # nunca por el sku (que no existe en esa tabla).
+            id_real = str(prod_row[0]).strip().lower()
+
+            stat_row = conn.execute(query_stat, {"id_clean": id_real}).fetchone()
+            seas_rows = conn.execute(query_seasonality, {"id_clean": id_real}).fetchall()
+            exo_rows = conn.execute(query_exo).fetchall()
 
         base_val_unitario = float(prod_row[1] or 10000.0)
         sim_val_unitario = base_val_unitario * (1.0 + (precio_pct / 100.0))
