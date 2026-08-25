@@ -10,12 +10,13 @@ from pydantic import BaseModel, Field
 
 from tesis_ia.data.exogenous_pipeline import ExogenousPipeline
 from tesis_ia.data.feature_calculator import FeatureCalculator
+from tesis_ia.models.cold_start import get_cold_start_engine
 from tesis_ia.training.db_trainer_predictor import DbTrainerPredictor
 from tesis_ia.utils.db_connector import test_connection
 
 app = FastAPI(
     title="Plataforma de Inteligencia Predictiva B2B - API de IA",
-    description="Microservicio de entrenamiento, ingesta exógena, predicciones y simulador de escenarios a 12 meses.",
+    description="Microservicio de entrenamiento, ingesta exógena, predicciones, simulador de escenarios y Cold Start para productos nuevos a 12 meses.",
     version="1.0.0",
 )
 
@@ -50,6 +51,27 @@ class SimulationResponse(BaseModel):
     simulacion: List[Dict[str, Any]]
 
 
+class ColdStartRequest(BaseModel):
+    id_departamento: int = Field(..., description="ID del departamento del producto (ej: 1 para Alimentos, 2 para Bebidas)")
+    id_categoria: int = Field(..., description="ID de la categoría del producto (ej: 5 para Aceites)")
+    id_marca: str = Field(..., description="ID o UUID de la marca del producto")
+    descripcion: str = Field("Nuevo Producto", description="Descripción comercial del producto nuevo")
+    contenido_neto: float = Field(..., gt=0, description="Contenido neto numérico (ej: 900, 1.5, 500)")
+    unidad_medida: str = Field(..., description="Unidad de medida: 'ml', 'lt', 'gr', 'kg', 'un'")
+    valor_unitario: float = Field(..., gt=0, description="Precio de venta unitario proyectado en Guaraníes (PYG)")
+    horizonte_meses: Optional[int] = Field(12, ge=1, le=24, description="Cantidad de meses a proyectar (def: 12)")
+    anio_inicio: Optional[int] = Field(None, description="Año inicial de la proyección (def: año actual)")
+    mes_inicio: Optional[int] = Field(None, description="Mes inicial de la proyección (1-12, def: mes actual)")
+    id_empresa: Optional[str] = Field(None, description="ID de la empresa (opcional)")
+
+
+class ColdStartResponse(BaseModel):
+    status: str
+    producto_nuevo: Dict[str, Any]
+    productos_similares_gemelos: List[Dict[str, Any]]
+    proyeccion_12_meses: List[Dict[str, Any]]
+
+
 @app.on_event("startup")
 def startup_event():
     try:
@@ -58,7 +80,15 @@ def startup_event():
         trainer.train_and_evaluate(model_family="random_forest")
         print("[STARTUP] Modelo Champion precargado exitosamente en RAM. Simulaciones de escenarios listas en < 50ms.")
     except Exception as e:
-        print(f"[WARN] No se pudo precargar el modelo en startup: {e}")
+        print(f"[WARN] No se pudo precargar el modelo Champion en startup: {e}")
+
+    try:
+        print("[STARTUP] Precargando motor de Cold Start (K-Means + KNN) en memoria RAM...")
+        cold_engine = get_cold_start_engine()
+        cold_engine.fit()
+        print("[STARTUP] Motor de Cold Start inicializado exitosamente en RAM.")
+    except Exception as e:
+        print(f"[WARN] No se pudo inicializar Cold Start en startup: {e}")
 
 
 @app.get("/health")
@@ -134,6 +164,28 @@ def run_simulation(req: SimulationRequest) -> SimulationResponse:
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al ejecutar la simulación de producto: {str(e)}")
+
+
+@app.post("/cold-start/predict", response_model=ColdStartResponse)
+def predict_cold_start(req: ColdStartRequest) -> ColdStartResponse:
+    try:
+        engine = get_cold_start_engine()
+        res = engine.predict_new_product(
+            id_departamento=req.id_departamento,
+            id_categoria=req.id_categoria,
+            id_marca=req.id_marca,
+            descripcion=req.descripcion,
+            contenido_neto=req.contenido_neto,
+            unidad_medida=req.unidad_medida,
+            valor_unitario=req.valor_unitario,
+            horizonte_meses=req.horizonte_meses or 12,
+            anio_inicio=req.anio_inicio,
+            mes_inicio=req.mes_inicio,
+            id_empresa=req.id_empresa,
+        )
+        return ColdStartResponse(**res)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error en predicción de Cold Start: {str(e)}")
 
 
 if __name__ == "__main__":
