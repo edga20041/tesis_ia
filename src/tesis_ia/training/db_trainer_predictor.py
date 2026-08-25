@@ -280,10 +280,15 @@ class DbTrainerPredictor:
         ids_emp = prods_merged["id_empresa"].to_numpy()
         val_unitarios = prods_merged["valor_unitario"].fillna(10000.0).to_numpy(dtype=np.float32)
 
-        base_units = prods_merged["avg_unidades"].fillna(50.0).to_numpy(dtype=np.float32)
-        l1 = prods_merged["last_lag_1"].fillna(base_units).to_numpy(dtype=np.float32)
-        l2 = prods_merged["last_lag_2"].fillna(base_units).to_numpy(dtype=np.float32)
-        ma3 = prods_merged["last_ma_3m"].fillna(base_units).to_numpy(dtype=np.float32)
+        base_units_series = prods_merged["avg_unidades"].fillna(50.0)
+        l1_series = prods_merged["last_lag_1"].fillna(base_units_series)
+        l2_series = prods_merged["last_lag_2"].fillna(base_units_series)
+        ma3_series = prods_merged["last_ma_3m"].fillna(base_units_series)
+
+        base_units = base_units_series.to_numpy(dtype=np.float32)
+        l1 = l1_series.to_numpy(dtype=np.float32)
+        l2 = l2_series.to_numpy(dtype=np.float32)
+        ma3 = ma3_series.to_numpy(dtype=np.float32)
 
         start_years = prods_merged["last_anio"].fillna(2025).astype(int).to_numpy()
         start_months = prods_merged["last_mes"].fillna(12).astype(int).to_numpy()
