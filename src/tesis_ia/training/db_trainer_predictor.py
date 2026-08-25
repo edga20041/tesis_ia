@@ -271,107 +271,123 @@ class DbTrainerPredictor:
         prods_merged = prods_df.merge(stats_df, on="id_producto_clean", how="left", suffixes=("", "_stat"))
         seasonality_map = seasonality_df.set_index(["id_producto_clean", "mes"])["avg_mes"].to_dict()
 
+        # Inferencia vectorizada de alta velocidad para todo el catálogo
+        n_prods = len(prods_merged)
+        print(f"[PREDICT] Iniciando inferencia vectorizada de alta velocidad para {n_prods:,} productos a 12 meses...")
+
+        ids_prod = prods_merged["id_producto"].to_numpy()
+        ids_prod_clean = prods_merged["id_producto_clean"].to_numpy()
+        ids_emp = prods_merged["id_empresa"].to_numpy()
+        val_unitarios = prods_merged["valor_unitario"].fillna(10000.0).to_numpy(dtype=np.float32)
+
+        base_units = prods_merged["avg_unidades"].fillna(50.0).to_numpy(dtype=np.float32)
+        l1 = prods_merged["last_lag_1"].fillna(base_units).to_numpy(dtype=np.float32)
+        l2 = prods_merged["last_lag_2"].fillna(base_units).to_numpy(dtype=np.float32)
+        ma3 = prods_merged["last_ma_3m"].fillna(base_units).to_numpy(dtype=np.float32)
+
+        start_years = prods_merged["last_anio"].fillna(2025).astype(int).to_numpy()
+        start_months = prods_merged["last_mes"].fillna(12).astype(int).to_numpy()
+
+        if isinstance(company_model_map, dict):
+            model_ids = np.array([company_model_map.get(emp, default_model_id) for emp in ids_emp])
+        else:
+            model_ids = np.array([default_model_id] * n_prods)
+
+        curr_y = start_years.copy()
+        curr_m = start_months.copy()
+
         proyecciones = []
-        default_model_id = company_model_map if isinstance(company_model_map, str) else next(iter(company_model_map.values()), str(uuid.uuid4()))
 
-        for _, prod in prods_merged.iterrows():
-            id_prod = prod["id_producto"]
-            id_prod_clean = prod["id_producto_clean"]
-            id_emp = prod["id_empresa"]
-            val_unitario = float(prod["valor_unitario"] or 10000.0)
+        for step in range(1, 13):
+            curr_m = curr_m + 1
+            overflow = curr_m > 12
+            curr_y[overflow] += 1
+            curr_m[overflow] = 1
 
-            id_mod = company_model_map.get(id_emp, default_model_id) if isinstance(company_model_map, dict) else default_model_id
+            l12 = np.empty(n_prods, dtype=np.float32)
+            t_max = np.empty(n_prods, dtype=np.float32)
+            t_med = np.empty(n_prods, dtype=np.float32)
+            precip = np.empty(n_prods, dtype=np.float32)
+            ipc_ind = np.empty(n_prods, dtype=np.float32)
+            ipc_var = np.empty(n_prods, dtype=np.float32)
+            tc_usd = np.empty(n_prods, dtype=np.float32)
+            n_feriados = np.empty(n_prods, dtype=np.float32)
+            has_festivo = np.empty(n_prods, dtype=np.float32)
 
-            base_units = float(prod["avg_unidades"] if pd.notnull(prod["avg_unidades"]) else 50.0)
-            l1 = float(prod["last_lag_1"] if pd.notnull(prod["last_lag_1"]) else base_units)
-            l2 = float(prod["last_lag_2"] if pd.notnull(prod["last_lag_2"]) else base_units)
-            ma3 = float(prod["last_ma_3m"] if pd.notnull(prod["last_ma_3m"]) else base_units)
-            
-            start_year = int(prod["last_anio"]) if pd.notnull(prod["last_anio"]) else 2025
-            start_month = int(prod["last_mes"]) if pd.notnull(prod["last_mes"]) else 12
+            for j in range(n_prods):
+                p_c = ids_prod_clean[j]
+                m_val = curr_m[j]
+                y_val = curr_y[j]
 
-            cur_date = datetime.date(start_year, start_month, 1)
+                l12[j] = seasonality_map.get((p_c, m_val), base_units[j])
 
-            for i in range(1, 13):
-                if cur_date.month == 12:
-                    cur_date = datetime.date(cur_date.year + 1, 1, 1)
+                if (y_val, m_val) in exo_exact_df.index:
+                    e = exo_exact_df.loc[(y_val, m_val)]
+                    if isinstance(e, pd.DataFrame): e = e.iloc[0]
+                    t_max[j] = float(e["temp_max_promedio"])
+                    t_med[j] = float(e["temp_media_promedio"])
+                    precip[j] = float(e["precipitacion_mm"])
+                    ipc_ind[j] = float(e["ipc_indice"])
+                    ipc_var[j] = float(e["ipc_var_interanual"])
+                    tc_usd[j] = float(e["tipo_cambio_pyg_usd"])
+                    n_feriados[j] = float(e["cantidad_feriados"])
+                    has_festivo[j] = float(e["tiene_festivo_comercial"])
+                elif m_val in exo_month_df.index:
+                    e = exo_month_df.loc[m_val]
+                    if isinstance(e, pd.DataFrame): e = e.iloc[0]
+                    t_max[j] = float(e["temp_max_promedio"])
+                    t_med[j] = float(e["temp_media_promedio"])
+                    precip[j] = float(e["precipitacion_mm"])
+                    ipc_ind[j] = float(e["ipc_indice"])
+                    ipc_var[j] = float(e["ipc_var_interanual"])
+                    tc_usd[j] = float(e["tipo_cambio_pyg_usd"])
+                    n_feriados[j] = float(e["cantidad_feriados"])
+                    has_festivo[j] = float(e["tiene_festivo_comercial"])
                 else:
-                    cur_date = datetime.date(cur_date.year, cur_date.month + 1, 1)
+                    t_max[j], t_med[j], precip[j] = 30.0, 25.0, 100.0
+                    ipc_ind[j], ipc_var[j], tc_usd[j] = 100.0, 4.5, 7500.0
+                    n_feriados[j], has_festivo[j] = 0.0, 0.0
 
-                p_anio = cur_date.year
-                p_mes = cur_date.month
+            # Matriz de características para todos los productos en este mes: shape (N, 12)
+            X_step = np.column_stack([
+                l1, l2, l12, ma3,
+                t_max, t_med, precip,
+                ipc_ind, ipc_var, tc_usd,
+                n_feriados, has_festivo
+            ])
 
-                if (id_prod_clean, p_mes) in seasonality_map:
-                    l12 = float(seasonality_map[(id_prod_clean, p_mes)])
-                else:
-                    l12 = base_units
+            preds_raw = model.predict(X_step)
 
-                if (p_anio, p_mes) in exo_exact_df.index:
-                    exo_row = exo_exact_df.loc[(p_anio, p_mes)]
-                    if isinstance(exo_row, pd.DataFrame):
-                        exo_row = exo_row.iloc[0]
-                    t_max = float(exo_row["temp_max_promedio"])
-                    t_med = float(exo_row["temp_media_promedio"])
-                    precip = float(exo_row["precipitacion_mm"])
-                    ipc_ind = float(exo_row["ipc_indice"])
-                    ipc_var = float(exo_row["ipc_var_interanual"])
-                    tc_usd = float(exo_row["tipo_cambio_pyg_usd"])
-                    n_feriados = float(exo_row["cantidad_feriados"])
-                    has_festivo = float(exo_row["tiene_festivo_comercial"])
+            # Modulación Estacional: preserva las oscilaciones orgánicas del mercado evitando que el árbol se estanque
+            seasonal_ratio = np.clip(l12 / np.maximum(base_units, 1.0), 0.70, 1.40)
+            pred_unidades = np.where(
+                preds_raw > 0,
+                np.round(preds_raw * seasonal_ratio, 2),
+                np.maximum(1.0, np.round(l12 * (1.0 + has_festivo * 0.15 - precip * 0.0005), 2))
+            )
 
-                elif p_mes in exo_month_df.index:
-                    exo_row = exo_month_df.loc[p_mes]
-                    if isinstance(exo_row, pd.DataFrame):
-                        exo_row = exo_row.iloc[0]
-                    t_max = float(exo_row["temp_max_promedio"])
-                    t_med = float(exo_row["temp_media_promedio"])
-                    precip = float(exo_row["precipitacion_mm"])
-                    ipc_ind = float(exo_row["ipc_indice"])
-                    ipc_var = float(exo_row["ipc_var_interanual"])
-                    tc_usd = float(exo_row["tipo_cambio_pyg_usd"])
-                    n_feriados = float(exo_row["cantidad_feriados"])
-                    has_festivo = float(exo_row["tiene_festivo_comercial"])
-                else:
-                    t_max, t_med, precip = 30.0, 25.0, 100.0
-                    ipc_ind, ipc_var, tc_usd = 100.0, 4.5, 7500.0
-                    n_feriados, has_festivo = 0.0, 0.0
-
-                feature_vector = np.array([[
-                    l1, l2, l12, ma3,
-                    t_max, t_med, precip,
-                    ipc_ind, ipc_var, tc_usd,
-                    n_feriados, has_festivo
-                ]])
-
-                pred_raw = float(model.predict(feature_vector)[0])
-
-                if pred_raw <= 0:
-                    pred_unidades = max(1.0, round(l12 * (1.0 + (has_festivo * 0.15) - (precip * 0.0005)), 2))
-                else:
-                    pred_unidades = round(pred_raw, 2)
-
-                monto_predicho = round(pred_unidades * val_unitario, 2)
-                inf = round(pred_unidades * 0.85, 2)
-                sup = round(pred_unidades * 1.15, 2)
-
-                pred_id = f"{id_prod}_{p_anio}_{p_mes}"
-
+            for j in range(n_prods):
+                p_unidades = float(pred_unidades[j])
+                val_u = float(val_unitarios[j])
+                p_y = int(curr_y[j])
+                p_m = int(curr_m[j])
+                p_id = ids_prod[j]
                 proyecciones.append({
-                    "id": pred_id,
-                    "id_empresa": id_emp,
-                    "id_producto": id_prod,
-                    "id_modelo": id_mod,
-                    "anio": p_anio,
-                    "mes": p_mes,
-                    "unidades_predichas": pred_unidades,
-                    "monto_predicho": monto_predicho,
-                    "intervalo_confianza_inf": inf,
-                    "intervalo_confianza_sup": sup
+                    "id": f"{p_id}_{p_y}_{p_m}",
+                    "id_empresa": ids_emp[j],
+                    "id_producto": p_id,
+                    "id_modelo": model_ids[j],
+                    "anio": p_y,
+                    "mes": p_m,
+                    "unidades_predichas": p_unidades,
+                    "monto_predicho": round(p_unidades * val_u, 2),
+                    "intervalo_confianza_inf": round(p_unidades * 0.85, 2),
+                    "intervalo_confianza_sup": round(p_unidades * 1.15, 2),
                 })
 
-                l2 = l1
-                l1 = pred_unidades
-                ma3 = round((l1 + l2 + ma3) / 3.0, 2)
+            l2 = l1.copy()
+            l1 = pred_unidades.copy()
+            ma3 = np.round((l1 + l2 + ma3) / 3.0, 2)
 
         sql_delete = text("DELETE FROM predicciones")
         sql_pred = text("""
@@ -389,7 +405,7 @@ class DbTrainerPredictor:
         try:
             with self.engine.begin() as conn:
                 conn.execute(sql_delete)
-                batch_size = 5000
+                batch_size = 10000
                 for i in range(0, len(proyecciones), batch_size):
                     batch = proyecciones[i:i + batch_size]
                     conn.execute(sql_pred, batch)
@@ -522,6 +538,9 @@ class DbTrainerPredictor:
                 tc_usd = 7200.0 * (1.0 + (usd_pct / 100.0))
                 n_feriados, has_festivo = 0.0, 0.0
 
+            seasonal_ratio = (l12 / base_units) if base_units > 0 else 1.0
+            seasonal_ratio = max(0.70, min(1.40, seasonal_ratio))
+
             feature_vector = np.array([[
                 l1 * price_elasticity_factor,
                 l2 * price_elasticity_factor,
@@ -536,7 +555,7 @@ class DbTrainerPredictor:
             if pred_raw <= 0:
                 pred_unidades = max(1.0, round(l12 * price_elasticity_factor, 2))
             else:
-                pred_unidades = round(pred_raw, 2)
+                pred_unidades = round(pred_raw * seasonal_ratio, 2)
 
             monto_simulado = round(pred_unidades * sim_val_unitario, 2)
 
