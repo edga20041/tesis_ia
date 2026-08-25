@@ -26,8 +26,10 @@ data:
     - tipo_cambio_pyg_usd
 
 model:
-  family: linear_model
-  architecture: multiple_regression
+  family: random_forest
+  architecture: random_forest_regressor
+  n_estimators: 100
+  max_depth: 12
   
 training:
   metrics: [mape, rmse]

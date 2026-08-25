@@ -1,4 +1,4 @@
-"""Módulo de entrenamiento de Regresión Lineal y generación de predicciones a 12 meses directamente en MySQL."""
+"""Módulo de entrenamiento del Modelo Champion (Random Forest / Regresión Lineal) y generación de predicciones a 12 meses directamente en MySQL."""
 
 from __future__ import annotations
 
@@ -10,13 +10,14 @@ from typing import Dict, Any, List, Tuple, Optional, Union
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from sqlalchemy import text
 
 from tesis_ia.utils.db_connector import get_engine
 
 # Variable global en memoria para caché del modelo entrenado
-_CACHED_MODEL: Optional[LinearRegression] = None
+_CACHED_MODEL: Optional[Any] = None
 
 
 class DbTrainerPredictor:
@@ -65,7 +66,7 @@ class DbTrainerPredictor:
             df = pd.read_sql(query, conn)
         return df
 
-    def train_and_evaluate(self) -> Tuple[LinearRegression, Dict[str, float], str, str]:
+    def train_and_evaluate(self, model_family: str = "random_forest") -> Tuple[Any, Dict[str, float], str, str]:
         global _CACHED_MODEL
         df = self.load_dataset_from_db()
         if df.empty:
@@ -91,7 +92,18 @@ class DbTrainerPredictor:
         X_test = df.loc[test_mask, self.FEATURE_COLS]
         y_test = df.loc[test_mask, "unidades_vendidas"]
 
-        model = LinearRegression()
+        if model_family == "random_forest":
+            print("[TRAIN] Entrenando Champion: Random Forest Regressor (n_estimators=100, max_depth=12)...")
+            model = RandomForestRegressor(
+                n_estimators=100,
+                max_depth=12,
+                n_jobs=-1,
+                random_state=42
+            )
+        else:
+            print("[TRAIN] Entrenando Baseline: Regresion Lineal Multivariada...")
+            model = LinearRegression()
+
         model.fit(X_train, y_train)
 
         # Guardar en memoria RAM para uso inmediato en simulaciones
@@ -114,11 +126,12 @@ class DbTrainerPredictor:
         fecha_hasta = f"{df['anio'].max()}-12-31"
 
         metrics = {"mae": mae, "rmse": rmse, "mape": mape}
-        print(f"[TRAIN] Regresión Lineal entrenada (Ventana Móvil: Train < {cutoff_date.strftime('%Y-%m')}, Validation Test >= {cutoff_date.strftime('%Y-%m')}). MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%")
+        print(f"[TRAIN] Modelo {model_family} entrenado exitosamente (Ventana: Train < {cutoff_date.strftime('%Y-%m')}, Val >= {cutoff_date.strftime('%Y-%m')}). MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}%")
         return model, metrics, fecha_desde, fecha_hasta
 
     def save_model_version(self, version: str, metrics: Dict[str, float],
-                           desde: str, hasta: str, id_empresa: Optional[str] = None) -> Dict[str, str]:
+                           desde: str, hasta: str, id_empresa: Optional[str] = None,
+                           model_family: str = "random_forest") -> Dict[str, str]:
         sql_get_empresas = text("SELECT id FROM empresa WHERE activo = 1")
         sql_deactivate = text("UPDATE modelos_versiones SET activo = 0 WHERE id_empresa = :id_empresa")
 
@@ -135,10 +148,16 @@ class DbTrainerPredictor:
                 mae = VALUES(mae),
                 rmse = VALUES(rmse),
                 mape = VALUES(mape),
+                hiperparametros = VALUES(hiperparametros),
                 activo = 1
         """)
 
         company_model_map: Dict[str, str] = {}
+
+        if model_family == "random_forest":
+            hiperparams = json.dumps({"family": "RandomForestRegressor", "n_estimators": 100, "max_depth": 12, "algorithm": "scikit-learn"})
+        else:
+            hiperparams = json.dumps({"family": "LinearRegression", "algorithm": "scikit-learn"})
 
         with self.engine.begin() as conn:
             if id_empresa:
@@ -160,7 +179,7 @@ class DbTrainerPredictor:
                     "mae": metrics["mae"],
                     "rmse": metrics["rmse"],
                     "mape": metrics["mape"],
-                    "hiperparametros": json.dumps({"family": "LinearRegression", "algorithm": "scikit-learn"})
+                    "hiperparametros": hiperparams
                 })
 
             rows = conn.execute(text("SELECT id_empresa, id FROM modelos_versiones WHERE activo = 1")).fetchall()
@@ -170,7 +189,7 @@ class DbTrainerPredictor:
         print(f"[OK] Modelo '{version}' guardado como ACTIVO para {len(company_model_map)} empresa(s).")
         return company_model_map
 
-    def generate_and_save_predictions(self, model: LinearRegression,
+    def generate_and_save_predictions(self, model: Any,
                                        company_model_map: Union[Dict[str, str], str]) -> int:
         query_prods = """
             SELECT DISTINCT 

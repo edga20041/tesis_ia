@@ -53,10 +53,10 @@ class SimulationResponse(BaseModel):
 @app.on_event("startup")
 def startup_event():
     try:
-        print("[STARTUP] Precargando modelo de IA en memoria RAM...")
+        print("[STARTUP] Precargando modelo Champion (Random Forest) en memoria RAM...")
         trainer = DbTrainerPredictor()
-        trainer.train_and_evaluate()
-        print("[STARTUP] Modelo precargado exitosamente en RAM. Simulaciones de escenarios listas en < 50ms.")
+        trainer.train_and_evaluate(model_family="random_forest")
+        print("[STARTUP] Modelo Champion precargado exitosamente en RAM. Simulaciones de escenarios listas en < 50ms.")
     except Exception as e:
         print(f"[WARN] No se pudo precargar el modelo en startup: {e}")
 
@@ -72,7 +72,6 @@ def health_check() -> Dict[str, Any]:
 
 
 def _ejecutar_pipeline_cierre(anio: int, mes: int, id_empresa: Optional[str]) -> Dict[str, Any]:
-    """Ejecuta sincrónicamente el ciclo completo de cierre mensual."""
     print(f"\n=== Iniciando Pipeline de Cierre Mensual para {anio}-{mes:02d} ===")
 
     exo_pipe = ExogenousPipeline()
@@ -85,17 +84,17 @@ def _ejecutar_pipeline_cierre(anio: int, mes: int, id_empresa: Optional[str]) ->
     feat_calc.compute_features_month(anio, mes)
 
     trainer = DbTrainerPredictor()
-    model, metrics, desde, hasta = trainer.train_and_evaluate()
+    model, metrics, desde, hasta = trainer.train_and_evaluate(model_family="random_forest")
 
-    version_name = f"baseline_linear_{anio}_{mes:02d}"
-    company_model_map = trainer.save_model_version(version_name, metrics, desde, hasta, id_empresa)
+    version_name = f"champion_rf_{anio}_{mes:02d}"
+    company_model_map = trainer.save_model_version(version_name, metrics, desde, hasta, id_empresa, model_family="random_forest")
 
     num_preds = trainer.generate_and_save_predictions(model, company_model_map)
     first_model_id = next(iter(company_model_map.values()), "model_id")
 
     return {
         "status": "success",
-        "message": f"Pipeline de cierre mensual para {anio}-{mes:02d} ejecutado correctamente.",
+        "message": f"Pipeline de cierre mensual para {anio}-{mes:02d} ejecutado correctamente con modelo Champion (Random Forest).",
         "anio": anio,
         "mes": mes,
         "exogenas_sincronizadas": exo_details,
