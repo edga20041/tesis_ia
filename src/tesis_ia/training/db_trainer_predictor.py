@@ -293,6 +293,7 @@ class DbTrainerPredictor:
         start_years = prods_merged["last_anio"].fillna(2025).astype(int).to_numpy()
         start_months = prods_merged["last_mes"].fillna(12).astype(int).to_numpy()
 
+        default_model_id = company_model_map if isinstance(company_model_map, str) else next(iter(company_model_map.values()), str(uuid.uuid4()))
         if isinstance(company_model_map, dict):
             model_ids = np.array([company_model_map.get(emp, default_model_id) for emp in ids_emp])
         else:
