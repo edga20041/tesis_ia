@@ -93,11 +93,11 @@ class DbTrainerPredictor:
         y_test = df.loc[test_mask, "unidades_vendidas"]
 
         if model_family == "random_forest":
-            print("[TRAIN] Entrenando Champion: Random Forest Regressor (n_estimators=100, max_depth=12)...")
+            print("[TRAIN] Entrenando Champion: Random Forest Regressor (n_estimators=50, max_depth=10, n_jobs=1)...")
             model = RandomForestRegressor(
-                n_estimators=100,
-                max_depth=12,
-                n_jobs=-1,
+                n_estimators=50,
+                max_depth=10,
+                n_jobs=1,
                 random_state=42
             )
         else:
