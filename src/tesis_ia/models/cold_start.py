@@ -87,6 +87,9 @@ class ColdStartEngine:
         catalog_df["id_producto_clean"] = catalog_df["id_producto"].astype(str).str.strip().str.lower()
         seasonality_df["id_producto_clean"] = seasonality_df["id_producto"].astype(str).str.strip().str.lower()
 
+        catalog_df["id_categoria"] = pd.to_numeric(catalog_df["id_categoria"], errors="coerce").fillna(1).astype(int)
+        catalog_df["id_departamento"] = pd.to_numeric(catalog_df["id_departamento"], errors="coerce").fillna(1).astype(int)
+
         seasonality_map = seasonality_df.set_index(["id_producto_clean", "mes"])["avg_mes"].to_dict()
 
         return catalog_df, seasonality_map
@@ -163,18 +166,67 @@ class ColdStartEngine:
 
         cluster_id = int(self.kmeans.predict(X_new)[0]) if self.kmeans else 0
 
-        distances, indices = self.knn.kneighbors(X_new)
-        peer_indices = indices[0]
-        peer_distances = distances[0]
+        cat_id_int = int(id_categoria)
+        dept_id_int = int(id_departamento)
 
+        cat_subset = self.catalog_df[self.catalog_df["id_categoria"] == cat_id_int]
+        if len(cat_subset) >= 3:
+            candidate_df = cat_subset.copy().reset_index(drop=True)
+        else:
+            dept_subset = self.catalog_df[self.catalog_df["id_departamento"] == dept_id_int]
+            if len(dept_subset) >= 3:
+                candidate_df = dept_subset.copy().reset_index(drop=True)
+            else:
+                candidate_df = self.catalog_df.copy().reset_index(drop=True)
+
+        cand_log_price = np.log1p(candidate_df["valor_unitario"].clip(lower=100.0).values)
+        cand_log_weight = np.log1p(candidate_df["contenido_neto"].clip(lower=1.0).values)
+        
+        target_log_price = np.log1p(max(100.0, float(valor_unitario)))
+        target_log_weight = np.log1p(max(1.0, float(contenido_neto)))
+
+        diff_price = np.abs(cand_log_price - target_log_price) / np.maximum(cand_log_price, target_log_price)
+        diff_weight = np.abs(cand_log_weight - target_log_weight) / np.maximum(cand_log_weight, target_log_weight)
+        
+        sim_price = np.clip(1.0 - diff_price, 0.0, 1.0)
+        sim_weight = np.clip(1.0 - diff_weight, 0.0, 1.0)
+        
+        same_brand = np.where(candidate_df["id_marca"].astype(str) == str(id_marca), 1.0, 0.0)
+        same_unit = np.where(candidate_df["unidad_medida"].astype(str).str.lower() == str(unidad_medida).lower(), 1.0, 0.0)
+        same_cat = np.where(candidate_df["id_categoria"] == cat_id_int, 1.0, 0.0)
+
+        desc_tokens = set(str(descripcion).lower().split())
+        def text_sim(s):
+            if not desc_tokens: return 0.5
+            s_tokens = set(str(s).lower().split())
+            inter = len(desc_tokens.intersection(s_tokens))
+            union = len(desc_tokens.union(s_tokens))
+            return (inter / union) if union > 0 else 0.0
+
+        sim_desc = candidate_df["descripcion"].apply(text_sim).values
+
+        affinity_scores = (
+            (0.35 * same_cat) +
+            (0.25 * sim_price) +
+            (0.20 * sim_weight) +
+            (0.10 * same_brand) +
+            (0.05 * same_unit) +
+            (0.05 * sim_desc)
+        )
+        
+        top_k = min(5, len(candidate_df))
+        top_indices = np.argsort(affinity_scores)[::-1][:top_k]
+        
         similar_products = []
         peer_avg_units_list = []
         peer_skus_clean = []
+        peer_weights = []
 
-        for idx, dist in zip(peer_indices, peer_distances):
-            peer = self.catalog_df.iloc[idx]
-            sim_pct = max(0.0, min(100.0, round((1.0 - float(dist)) * 100.0, 1)))
-            
+        for idx_pos in top_indices:
+            peer = candidate_df.iloc[idx_pos]
+            score_val = float(affinity_scores[idx_pos])
+            sim_pct = max(10.0, min(100.0, round(score_val * 100.0, 1)))
+
             similar_products.append({
                 "id_producto": str(peer["id_producto"]),
                 "sku": str(peer["sku"]),
@@ -191,10 +243,10 @@ class ColdStartEngine:
             })
             peer_avg_units_list.append(float(peer["avg_unidades"]))
             peer_skus_clean.append(str(peer["id_producto_clean"]))
+            peer_weights.append(max(0.1, score_val))
 
-        weights = [max(0.05, 1.0 - float(d)) for d in peer_distances]
-        sum_weights = sum(weights) or 1.0
-        normalized_weights = [w / sum_weights for w in weights]
+        sum_weights = sum(peer_weights) or 1.0
+        normalized_weights = [w / sum_weights for w in peer_weights]
 
         base_estimated_units = sum(u * w for u, w in zip(peer_avg_units_list, normalized_weights))
 

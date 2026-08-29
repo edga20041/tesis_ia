@@ -514,7 +514,16 @@ class DbTrainerPredictor:
         cur_date = datetime.date(start_year, start_month, 1)
         simulados = []
 
-        price_elasticity_factor = 1.0 - (0.5 * (precio_pct / 100.0))
+        macro_elasticity_factor = max(
+            0.40,
+            min(
+                1.80,
+                1.0 
+                - (0.50 * (precio_pct / 100.0))
+                - (0.20 * (usd_pct / 100.0))
+                - (0.25 * (ipc_pct / 100.0))
+            )
+        )
 
         for _ in range(1, 13):
             if cur_date.month == 12:
@@ -548,10 +557,10 @@ class DbTrainerPredictor:
             seasonal_ratio = max(0.70, min(1.40, seasonal_ratio))
 
             feature_vector = np.array([[
-                l1 * price_elasticity_factor,
-                l2 * price_elasticity_factor,
-                l12 * price_elasticity_factor,
-                ma3 * price_elasticity_factor,
+                l1 * macro_elasticity_factor,
+                l2 * macro_elasticity_factor,
+                l12 * macro_elasticity_factor,
+                ma3 * macro_elasticity_factor,
                 t_max, t_med, precip,
                 ipc_ind, ipc_var, tc_usd,
                 n_feriados, has_festivo
@@ -559,7 +568,7 @@ class DbTrainerPredictor:
 
             pred_raw = float(model.predict(feature_vector)[0])
             if pred_raw <= 0:
-                pred_unidades = max(1.0, round(l12 * price_elasticity_factor, 2))
+                pred_unidades = max(1.0, round(l12 * macro_elasticity_factor, 2))
             else:
                 pred_unidades = round(pred_raw * seasonal_ratio, 2)
 
