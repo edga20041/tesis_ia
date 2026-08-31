@@ -188,6 +188,15 @@ def predict_cold_start(req: ColdStartRequest) -> ColdStartResponse:
         raise HTTPException(status_code=500, detail=f"Error en predicción de Cold Start: {str(e)}")
 
 
+@app.get("/model/explainability")
+def get_model_explainability() -> Dict[str, Any]:
+    try:
+        trainer = DbTrainerPredictor()
+        return trainer.get_model_explainability()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener explicabilidad del modelo: {str(e)}")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("tesis_ia.api:app", host="0.0.0.0", port=8000, reload=True)

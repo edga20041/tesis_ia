@@ -592,6 +592,66 @@ class DbTrainerPredictor:
 
         return simulados
 
+    def get_model_explainability(self) -> Dict[str, Any]:
+        global _CACHED_MODEL
+        model = _CACHED_MODEL
+        if model is None:
+            model, _, _, _ = self.train_and_evaluate()
+
+        feature_metadata = {
+            "lag_1": {"nombre": "Ventas del Mes Anterior (t-1)", "grupo": "Historial y Tendencia"},
+            "lag_2": {"nombre": "Ventas Hace 2 Meses (t-2)", "grupo": "Historial y Tendencia"},
+            "lag_12": {"nombre": "Ventas Mismo Mes Año Anterior (t-12)", "grupo": "Historial y Tendencia"},
+            "ma_3m": {"nombre": "Media Móvil Trimestral", "grupo": "Historial y Tendencia"},
+            "temp_max_promedio": {"nombre": "Temperatura Máxima Promedio", "grupo": "Variables Climáticas"},
+            "temp_media_promedio": {"nombre": "Temperatura Media Promedio", "grupo": "Variables Climáticas"},
+            "precipitacion_mm": {"nombre": "Precipitación Acumulada (mm)", "grupo": "Variables Climáticas"},
+            "ipc_indice": {"nombre": "Índice de Precios al Consumidor (IPC)", "grupo": "Variables Macroeconómicas"},
+            "ipc_var_interanual": {"nombre": "Inflación Interanual (%)", "grupo": "Variables Macroeconómicas"},
+            "tipo_cambio_pyg_usd": {"nombre": "Tipo de Cambio (PYG / USD)", "grupo": "Variables Macroeconómicas"},
+            "cantidad_feriados": {"nombre": "Días Feriados en el Mes", "grupo": "Calendario y Festividades"},
+            "tiene_festivo_comercial": {"nombre": "Festivo Comercial Clave", "grupo": "Calendario y Festividades"},
+        }
+
+        if hasattr(model, "feature_importances_"):
+            raw_importances = model.feature_importances_
+            total = np.sum(raw_importances)
+            normalized = (raw_importances / total * 100.0) if total > 0 else raw_importances
+        elif hasattr(model, "coef_"):
+            raw_coefs = np.abs(model.coef_)
+            total = np.sum(raw_coefs)
+            normalized = (raw_coefs / total * 100.0) if total > 0 else raw_coefs
+        else:
+            normalized = np.ones(len(self.FEATURE_COLS)) / len(self.FEATURE_COLS) * 100.0
+
+        variables_list = []
+        grupos_dict = {}
+
+        for feat, val in sorted(zip(self.FEATURE_COLS, normalized), key=lambda x: x[1], reverse=True):
+            pct_val = round(float(val), 2)
+            meta = feature_metadata.get(feat, {"nombre": feat, "grupo": "General"})
+            grupo_name = meta["grupo"]
+
+            impacto_label = "Muy Alto" if pct_val >= 40.0 else ("Alto" if pct_val >= 10.0 else ("Moderado" if pct_val >= 1.0 else "Bajo"))
+
+            variables_list.append({
+                "feature": feat,
+                "nombre_descriptivo": meta["nombre"],
+                "grupo": grupo_name,
+                "importancia_pct": pct_val,
+                "nivel_impacto": impacto_label,
+            })
+
+            grupos_dict[grupo_name] = round(grupos_dict.get(grupo_name, 0.0) + pct_val, 2)
+
+        return {
+            "status": "success",
+            "modelo_tipo": type(model).__name__,
+            "total_variables": len(self.FEATURE_COLS),
+            "resumen_por_grupo": grupos_dict,
+            "importancia_variables": variables_list
+        }
+
 
 if __name__ == "__main__":
     runner = DbTrainerPredictor()
