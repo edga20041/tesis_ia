@@ -202,16 +202,26 @@ class DbTrainerPredictor:
             JOIN marcas m ON p.id_marca = m.id
         """
         query_stats = """
-            SELECT 
-                id_producto,
-                AVG(unidades_vendidas) AS avg_unidades,
-                AVG(COALESCE(lag_1, unidades_vendidas)) AS last_lag_1,
-                AVG(COALESCE(lag_2, unidades_vendidas)) AS last_lag_2,
-                AVG(COALESCE(ma_3m, unidades_vendidas)) AS last_ma_3m,
-                SUBSTRING_INDEX(MAX(CONCAT(anio, '-', LPAD(mes, 2, '0'))), '-', 1) AS last_anio,
-                SUBSTRING_INDEX(MAX(CONCAT(anio, '-', LPAD(mes, 2, '0'))), '-', -1) AS last_mes
-            FROM ventas_mensuales
-            GROUP BY id_producto
+            SELECT
+                r.id_producto,
+                s.avg_unidades,
+                COALESCE(r.lag_1, r.unidades_vendidas) AS last_lag_1,
+                COALESCE(r.lag_2, r.unidades_vendidas) AS last_lag_2,
+                COALESCE(r.ma_3m, r.unidades_vendidas) AS last_ma_3m,
+                r.anio AS last_anio,
+                r.mes AS last_mes
+            FROM (
+                SELECT
+                    id_producto, anio, mes, unidades_vendidas, lag_1, lag_2, ma_3m,
+                    ROW_NUMBER() OVER (PARTITION BY id_producto ORDER BY anio DESC, mes DESC) AS rn
+                FROM ventas_mensuales
+            ) r
+            JOIN (
+                SELECT id_producto, AVG(unidades_vendidas) AS avg_unidades
+                FROM ventas_mensuales
+                GROUP BY id_producto
+            ) s ON s.id_producto = r.id_producto
+            WHERE r.rn = 1
         """
         query_monthly_seasonality = """
             SELECT 
@@ -418,7 +428,11 @@ class DbTrainerPredictor:
 
             l2 = l1.copy()
             l1 = pred_unidades.copy()
-            ma3 = np.round((l1 + l2 + ma3) / 3.0, 2)
+            # Misma fórmula que en entrenamiento (feature_calculator.py): ma_3m = (lag_1 + lag_2) / 2.
+            # Antes era (l1+l2+ma3_anterior)/3, una fórmula distinta a la aprendida por el modelo —
+            # ma_3m es el feature dominante, así que la discrepancia distorsionaba fuerte los primeros
+            # meses de cada pronóstico tras cualquier cambio de nivel de demanda.
+            ma3 = np.round((l1 + l2) / 2.0, 2)
 
         sql_delete = text("DELETE FROM predicciones")
         sql_pred = text("""
@@ -472,16 +486,21 @@ class DbTrainerPredictor:
             LIMIT 1
         """)
 
+        # last_lag_1/last_lag_2/last_ma_3m: valores de la fila REAL más reciente del producto (no un
+        # AVG() de toda su historia, que arranca la simulación en el nivel equivocado para productos
+        # con tendencia — mismo fix que query_stats de generate_and_save_predictions).
         query_stat = text("""
-            SELECT 
-                AVG(unidades_vendidas) AS avg_unidades,
-                AVG(COALESCE(lag_1, unidades_vendidas)) AS last_lag_1,
-                AVG(COALESCE(lag_2, unidades_vendidas)) AS last_lag_2,
-                AVG(COALESCE(ma_3m, unidades_vendidas)) AS last_ma_3m,
-                SUBSTRING_INDEX(MAX(CONCAT(anio, '-', LPAD(mes, 2, '0'))), '-', 1) AS last_anio,
-                SUBSTRING_INDEX(MAX(CONCAT(anio, '-', LPAD(mes, 2, '0'))), '-', -1) AS last_mes
+            SELECT
+                (SELECT AVG(unidades_vendidas) FROM ventas_mensuales WHERE LOWER(id_producto) = :id_clean) AS avg_unidades,
+                COALESCE(lag_1, unidades_vendidas) AS last_lag_1,
+                COALESCE(lag_2, unidades_vendidas) AS last_lag_2,
+                COALESCE(ma_3m, unidades_vendidas) AS last_ma_3m,
+                anio AS last_anio,
+                mes AS last_mes
             FROM ventas_mensuales
             WHERE LOWER(id_producto) = :id_clean
+            ORDER BY anio DESC, mes DESC
+            LIMIT 1
         """)
 
         query_seasonality = text("""
@@ -624,7 +643,7 @@ class DbTrainerPredictor:
 
             l2 = l1
             l1 = pred_unidades
-            ma3 = round((l1 + l2 + ma3) / 3.0, 2)
+            ma3 = round((l1 + l2) / 2.0, 2)
 
         return simulados
 
