@@ -104,12 +104,14 @@ class DbTrainerPredictor:
             print("[TRAIN] Entrenando Baseline: Regresion Lineal Multivariada...")
             model = LinearRegression()
 
-        model.fit(X_train, y_train)
+        y_train_log = np.log1p(np.clip(y_train, 0, None))
+        model.fit(X_train, y_train_log)
 
         # Guardar en memoria RAM para uso inmediato en simulaciones
         _CACHED_MODEL = model
 
-        y_pred = model.predict(X_test)
+        y_pred_log = model.predict(X_test)
+        y_pred = np.expm1(np.clip(y_pred_log, 0, None))
         y_pred = np.clip(y_pred, 0, None)  # No permitir ventas negativas
 
         mae = float(mean_absolute_error(y_test, y_pred)) if len(y_test) > 0 else 0.0
@@ -362,7 +364,8 @@ class DbTrainerPredictor:
                 n_feriados, has_festivo
             ])
 
-            preds_raw = model.predict(X_step)
+            preds_raw_log = model.predict(X_step)
+            preds_raw = np.expm1(np.clip(preds_raw_log, 0, None))
 
             # Modulación Estacional: preserva las oscilaciones orgánicas del mercado evitando que el árbol se estanque
             seasonal_ratio = np.clip(l12 / np.maximum(base_units, 1.0), 0.70, 1.40)
@@ -566,7 +569,8 @@ class DbTrainerPredictor:
                 n_feriados, has_festivo
             ]])
 
-            pred_raw = float(model.predict(feature_vector)[0])
+            pred_raw_log = float(model.predict(feature_vector)[0])
+            pred_raw = float(np.expm1(max(0.0, pred_raw_log)))
             if pred_raw <= 0:
                 pred_unidades = max(1.0, round(l12 * macro_elasticity_factor, 2))
             else:
