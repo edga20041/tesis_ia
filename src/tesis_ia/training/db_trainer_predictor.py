@@ -369,11 +369,33 @@ class DbTrainerPredictor:
 
             # Modulación Estacional: preserva las oscilaciones orgánicas del mercado evitando que el árbol se estanque
             seasonal_ratio = np.clip(l12 / np.maximum(base_units, 1.0), 0.70, 1.40)
-            pred_unidades = np.where(
-                preds_raw > 0,
-                np.round(preds_raw * seasonal_ratio, 2),
-                np.maximum(1.0, np.round(l12 * (1.0 + has_festivo * 0.15 - precip * 0.0005), 2))
-            )
+
+            if hasattr(model, "estimators_") and len(model.estimators_) > 0:
+                tree_preds_raw = np.array([tree.predict(X_step) for tree in model.estimators_])  # shape: (50, N)
+                tree_preds_units = np.expm1(np.clip(tree_preds_raw, 0, None))  # shape: (50, N)
+                tree_preds_mod = tree_preds_units * seasonal_ratio  # shape: (50, N)
+
+                pred_p10 = np.percentile(tree_preds_mod, 10, axis=0)
+                pred_p50 = np.percentile(tree_preds_mod, 50, axis=0)
+                pred_p90 = np.percentile(tree_preds_mod, 90, axis=0)
+
+                pred_unidades = np.where(
+                    pred_p50 > 0,
+                    np.round(pred_p50, 2),
+                    np.maximum(1.0, np.round(l12 * (1.0 + has_festivo * 0.15 - precip * 0.0005), 2))
+                )
+                pred_inf = np.maximum(0.0, np.round(pred_p10, 2))
+                pred_sup = np.round(np.maximum(pred_unidades, pred_p90), 2)
+            else:
+                preds_raw_log = model.predict(X_step)
+                preds_raw = np.expm1(np.clip(preds_raw_log, 0, None))
+                pred_unidades = np.where(
+                    preds_raw > 0,
+                    np.round(preds_raw * seasonal_ratio, 2),
+                    np.maximum(1.0, np.round(l12 * (1.0 + has_festivo * 0.15 - precip * 0.0005), 2))
+                )
+                pred_inf = np.round(pred_unidades * 0.85, 2)
+                pred_sup = np.round(pred_unidades * 1.15, 2)
 
             for j in range(n_prods):
                 p_unidades = float(pred_unidades[j])
@@ -390,8 +412,8 @@ class DbTrainerPredictor:
                     "mes": p_m,
                     "unidades_predichas": p_unidades,
                     "monto_predicho": round(p_unidades * val_u, 2),
-                    "intervalo_confianza_inf": round(p_unidades * 0.85, 2),
-                    "intervalo_confianza_sup": round(p_unidades * 1.15, 2),
+                    "intervalo_confianza_inf": float(pred_inf[j]),
+                    "intervalo_confianza_sup": float(pred_sup[j]),
                 })
 
             l2 = l1.copy()
@@ -569,12 +591,24 @@ class DbTrainerPredictor:
                 n_feriados, has_festivo
             ]])
 
-            pred_raw_log = float(model.predict(feature_vector)[0])
-            pred_raw = float(np.expm1(max(0.0, pred_raw_log)))
-            if pred_raw <= 0:
-                pred_unidades = max(1.0, round(l12 * macro_elasticity_factor, 2))
+            if hasattr(model, "estimators_") and len(model.estimators_) > 0:
+                tree_preds_raw = np.array([tree.predict(feature_vector)[0] for tree in model.estimators_])
+                tree_preds_units = np.expm1(np.clip(tree_preds_raw, 0, None)) * seasonal_ratio
+                p10 = float(np.percentile(tree_preds_units, 10))
+                p50 = float(np.percentile(tree_preds_units, 50))
+                p90 = float(np.percentile(tree_preds_units, 90))
+                pred_unidades = round(p50, 2) if p50 > 0 else max(1.0, round(l12 * macro_elasticity_factor, 2))
+                sim_inf = round(max(0.0, p10), 2)
+                sim_sup = round(max(pred_unidades, p90), 2)
             else:
-                pred_unidades = round(pred_raw * seasonal_ratio, 2)
+                pred_raw_log = float(model.predict(feature_vector)[0])
+                pred_raw = float(np.expm1(max(0.0, pred_raw_log)))
+                if pred_raw <= 0:
+                    pred_unidades = max(1.0, round(l12 * macro_elasticity_factor, 2))
+                else:
+                    pred_unidades = round(pred_raw * seasonal_ratio, 2)
+                sim_inf = round(pred_unidades * 0.85, 2)
+                sim_sup = round(pred_unidades * 1.15, 2)
 
             monto_simulado = round(pred_unidades * sim_val_unitario, 2)
 
@@ -583,7 +617,9 @@ class DbTrainerPredictor:
                 "mes": p_mes,
                 "unidades_simuladas": pred_unidades,
                 "monto_simulado": monto_simulado,
-                "precio_unitario_simulado": round(sim_val_unitario, 2)
+                "precio_unitario_simulado": round(sim_val_unitario, 2),
+                "intervalo_confianza_inf": sim_inf,
+                "intervalo_confianza_sup": sim_sup,
             })
 
             l2 = l1
