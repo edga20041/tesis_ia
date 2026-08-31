@@ -17,6 +17,8 @@ from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from tesis_ia.utils.db_connector import get_engine
 
@@ -28,6 +30,7 @@ class ColdStartEngine:
         self.pipeline: Optional[ColumnTransformer] = None
         self.kmeans: Optional[KMeans] = None
         self.knn: Optional[NearestNeighbors] = None
+        self.tfidf: Optional[TfidfVectorizer] = None
         self.catalog_df: Optional[pd.DataFrame] = None
         self.seasonality_map: Dict[Tuple[str, int], float] = {}
         self.is_fitted = False
@@ -126,8 +129,11 @@ class ColdStartEngine:
         self.knn = NearestNeighbors(n_neighbors=min(5, n_samples), metric="cosine")
         self.knn.fit(X_transformed)
 
+        self.tfidf = TfidfVectorizer(ngram_range=(1, 2), min_df=1, lowercase=True, max_features=1000)
+        self.tfidf.fit(catalog_df["descripcion"].fillna("").astype(str))
+
         self.is_fitted = True
-        print(f"[COLD-START] Motor ajustado con {n_samples:,} productos en {n_clusters} clústeres.")
+        print(f"[COLD-START] Motor ajustado con {n_samples:,} productos en {n_clusters} clústeres y TF-IDF N-Grams.")
         return True
 
     def predict_new_product(
@@ -195,15 +201,13 @@ class ColdStartEngine:
         same_unit = np.where(candidate_df["unidad_medida"].astype(str).str.lower() == str(unidad_medida).lower(), 1.0, 0.0)
         same_cat = np.where(candidate_df["id_categoria"] == cat_id_int, 1.0, 0.0)
 
-        desc_tokens = set(str(descripcion).lower().split())
-        def text_sim(s):
-            if not desc_tokens: return 0.5
-            s_tokens = set(str(s).lower().split())
-            inter = len(desc_tokens.intersection(s_tokens))
-            union = len(desc_tokens.union(s_tokens))
-            return (inter / union) if union > 0 else 0.0
-
-        sim_desc = candidate_df["descripcion"].apply(text_sim).values
+        # Similitud de texto semántica con TF-IDF (N-gramas)
+        if self.tfidf is not None and len(candidate_df) > 0:
+            cand_tfidf = self.tfidf.transform(candidate_df["descripcion"].fillna("").astype(str))
+            target_tfidf = self.tfidf.transform([str(descripcion)])
+            sim_desc = cosine_similarity(target_tfidf, cand_tfidf)[0]
+        else:
+            sim_desc = np.zeros(len(candidate_df))
 
         affinity_scores = (
             (0.35 * same_cat) +
@@ -262,9 +266,12 @@ class ColdStartEngine:
         cur_date = datetime.date(start_year, start_month, 1)
         proyeccion_12_meses = []
 
-        for _ in range(horizonte_meses):
+        for idx_m in range(horizonte_meses):
             p_anio = cur_date.year
             p_mes = cur_date.month
+
+            # Rampa de penetración comercial: Mes 1 = 65%, Mes 2 = 85%, Mes 3+ = 100%
+            ramp_factor = 0.65 if idx_m == 0 else (0.85 if idx_m == 1 else 1.0)
 
             month_factors = []
             for sku_clean in peer_skus_clean:
@@ -280,7 +287,7 @@ class ColdStartEngine:
             avg_month_factor = sum(f * w for f, w in zip(month_factors, normalized_weights))
             avg_month_factor = max(0.70, min(1.40, avg_month_factor))
 
-            pred_unidades = round(calibrated_base_units * avg_month_factor, 2)
+            pred_unidades = round(calibrated_base_units * avg_month_factor * ramp_factor, 2)
             monto_predicho = round(pred_unidades * valor_unitario, 2)
 
             proyeccion_12_meses.append({
@@ -290,13 +297,17 @@ class ColdStartEngine:
                 "monto_predicho": monto_predicho,
                 "intervalo_confianza_inf": round(pred_unidades * 0.80, 2),
                 "intervalo_confianza_sup": round(pred_unidades * 1.20, 2),
-                "factor_estacional_aplicado": round(avg_month_factor, 3)
+                "factor_estacional_aplicado": round(avg_month_factor, 3),
+                "factor_penetracion": ramp_factor
             })
 
             if cur_date.month == 12:
                 cur_date = datetime.date(cur_date.year + 1, 1, 1)
             else:
                 cur_date = datetime.date(cur_date.year, cur_date.month + 1, 1)
+
+        avg_top_sim = np.mean([p["similitud_pct"] for p in similar_products[:3]]) if similar_products else 50.0
+        conf_level = "ALTA" if avg_top_sim >= 75.0 else ("MODERADA" if avg_top_sim >= 60.0 else "PRELIMINAR")
 
         return {
             "status": "success",
@@ -310,7 +321,9 @@ class ColdStartEngine:
                 "valor_unitario": valor_unitario,
                 "cluster_asignado": cluster_id,
                 "unidades_base_estimadas": calibrated_base_units,
-                "factor_elasticidad_precio": round(price_elasticity_factor, 3)
+                "factor_elasticidad_precio": round(price_elasticity_factor, 3),
+                "nivel_confianza": conf_level,
+                "confianza_score_pct": round(avg_top_sim, 1)
             },
             "productos_similares_gemelos": similar_products,
             "proyeccion_12_meses": proyeccion_12_meses
