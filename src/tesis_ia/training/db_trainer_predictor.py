@@ -94,15 +94,20 @@ class DbTrainerPredictor:
 
         if model_family == "random_forest":
             # Hiperparametros ajustados por barrido real contra la BD de produccion (backtest de
-            # ultimos 12 meses observados): n_estimators=50/max_depth=10 daba MAPE=33.31%/WMAPE=12.79%;
-            # esta config da MAPE=15.38%/WMAPE=6.77%/MAE=155.03 (vs 292.80), mismo orden de RMSE.
-            # min_samples_leaf=2 evita que arboles sin limite de profundidad memoricen leaf-nodes de 1
-            # sola fila. Costo: ~90s de entrenamiento en vez de ~12s, irrelevante para un cron mensual.
-            print("[TRAIN] Entrenando Champion: Random Forest Regressor (n_estimators=200, max_depth=None, min_samples_leaf=2, n_jobs=-1)...")
+            # ultimos 12 meses observados): n_estimators=50/max_depth=10 daba MAPE=33.31%/WMAPE=12.79%
+            # con ~286MB de RAM por proceso. Se probo primero max_depth=None (sin limite), que bajaba
+            # a MAPE=15.38% pero tumbaba el contenedor por OOM en el VPS real (~5.8GB de RSS, confirmado
+            # con `dmesg | grep "Out of memory"` tras 3 caidas reales en produccion) - max_depth no acota
+            # el tamano del arbol de forma predecible con ~500k filas de entrenamiento.
+            # Fix: max_leaf_nodes acota el arbol de forma DIRECTA (independiente de como se ramifiquen
+            # los datos). n_estimators=100/max_leaf_nodes=10000 da MAPE=15.38%->16.92%/WMAPE=6.77%->9.37%
+            # (casi toda la mejora de la config sin limite) con solo ~627MB de RSS medido (9x menos que
+            # la version que rompio produccion), dejando margen real en un VPS de 7.8GB compartido con
+            # MySQL y tesis_back.
+            print("[TRAIN] Entrenando Champion: Random Forest Regressor (n_estimators=100, max_leaf_nodes=10000, n_jobs=-1)...")
             model = RandomForestRegressor(
-                n_estimators=200,
-                max_depth=None,
-                min_samples_leaf=2,
+                n_estimators=100,
+                max_leaf_nodes=10000,
                 n_jobs=-1,
                 random_state=42
             )
@@ -163,7 +168,7 @@ class DbTrainerPredictor:
         company_model_map: Dict[str, str] = {}
 
         if model_family == "random_forest":
-            hiperparams = json.dumps({"family": "RandomForestRegressor", "n_estimators": 200, "max_depth": None, "min_samples_leaf": 2, "algorithm": "scikit-learn"})
+            hiperparams = json.dumps({"family": "RandomForestRegressor", "n_estimators": 100, "max_leaf_nodes": 10000, "algorithm": "scikit-learn"})
         else:
             hiperparams = json.dumps({"family": "LinearRegression", "algorithm": "scikit-learn"})
 
