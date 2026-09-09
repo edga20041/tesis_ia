@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import uuid
 import datetime
@@ -19,6 +20,11 @@ from tesis_ia.utils.db_connector import get_engine
 # Variable global en memoria para caché del modelo entrenado
 _CACHED_MODEL: Optional[Any] = None
 
+# Caché del especialista de target relativo del modelo híbrido. Se mantiene separado
+# de _CACHED_MODEL a propósito: el endpoint XAI y el simulador siguen leyendo el
+# modelo logarítmico, cuyo espacio de features no cambió.
+_CACHED_RATIO_MODEL: Optional[Any] = None
+
 
 class DbTrainerPredictor:
 
@@ -28,6 +34,24 @@ class DbTrainerPredictor:
         "ipc_indice", "ipc_var_interanual", "tipo_cambio_pyg_usd",
         "cantidad_feriados", "tiene_festivo_comercial"
     ]
+
+    # Features adicionales del especialista de target relativo. Las variables
+    # contemporáneas van desplazadas un mes porque market_share_unidades y
+    # price_gap_pct del mes t se calculan con las ventas de ese mismo mes: usarlas
+    # sin desplazar sería fuga de datos (el modelo vería la respuesta).
+    EXTRA_FEATURE_COLS = [
+        "mes_sin", "mes_cos",
+        "precio_unitario_lag1", "price_gap_lag1", "market_share_lag1",
+        "log_base",
+    ]
+
+    # Techo relativo del modelo híbrido: la predicción del especialista de ratio no
+    # puede exceder K veces la del modelo logarítmico. Acota el modo de falla del
+    # target relativo en SKUs con base histórica obsoleta (media móvil alta y demanda
+    # derrumbada), donde llegaba a un APE medio de 804%.
+    # K=1.25 fue elegido por validación anidada sobre la ventana 2023-12/2024-12 y
+    # evaluado sin reajuste sobre 2024-12/2025-12.
+    K_TECHO_RELATIVO = 1.25
 
     def __init__(self, engine=None):
         self.engine = engine or get_engine()
@@ -66,13 +90,49 @@ class DbTrainerPredictor:
             df = pd.read_sql(query, conn)
         return df
 
+    @staticmethod
+    def calcular_base_escala(ma_3m, lag_1, lag_12):
+        """Nivel histórico de referencia del SKU, denominador del target relativo.
+
+        Prioriza la media móvil y cae a lag_1 y lag_12 cuando la serie es corta.
+        Debe calcularse igual en entrenamiento y en inferencia o el target relativo
+        se reconstruye contra una escala distinta a la aprendida.
+        """
+        base = np.asarray(ma_3m, dtype=float).copy()
+        for alt in (lag_1, lag_12):
+            faltante = base <= 0
+            if not faltante.any():
+                break
+            base[faltante] = np.asarray(alt, dtype=float)[faltante]
+        return np.clip(base, 0, None)
+
+    def derive_extra_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.sort_values(["id_producto", "id_empresa", "anio", "mes"]).reset_index(drop=True)
+
+        df["mes_sin"] = np.sin(2 * np.pi * df["mes"] / 12.0)
+        df["mes_cos"] = np.cos(2 * np.pi * df["mes"] / 12.0)
+
+        grupo = df.groupby(["id_producto", "id_empresa"], sort=False)
+        df["precio_unitario_lag1"] = grupo["precio_unitario"].shift(1).fillna(0.0)
+        df["price_gap_lag1"] = grupo["price_gap_pct"].shift(1).fillna(0.0)
+        df["market_share_lag1"] = grupo["market_share_unidades"].shift(1).fillna(0.0)
+
+        df["base_escala"] = self.calcular_base_escala(df["ma_3m"], df["lag_1"], df["lag_12"])
+        df["log_base"] = np.log1p(df["base_escala"])
+        return df
+
+    @classmethod
+    def aplicar_techo_relativo(cls, pred_log: np.ndarray, pred_ratio: np.ndarray) -> np.ndarray:
+        return np.minimum(pred_ratio, cls.K_TECHO_RELATIVO * np.maximum(pred_log, 1.0))
+
     def train_and_evaluate(self, model_family: str = "random_forest") -> Tuple[Any, Dict[str, float], str, str]:
-        global _CACHED_MODEL
+        global _CACHED_MODEL, _CACHED_RATIO_MODEL
         df = self.load_dataset_from_db()
         if df.empty:
             raise ValueError("No hay datos en ventas_mensuales para entrenar.")
 
         df[self.FEATURE_COLS] = df[self.FEATURE_COLS].fillna(0)
+        df = self.derive_extra_features(df)
 
         df["periodo_date"] = pd.to_datetime(df["anio"].astype(str) + "-" + df["mes"].astype(str) + "-01")
         max_period_date = df["periodo_date"].max()
@@ -122,8 +182,32 @@ class DbTrainerPredictor:
         _CACHED_MODEL = model
 
         y_pred_log = model.predict(X_test)
-        y_pred = np.expm1(np.clip(y_pred_log, 0, None))
-        y_pred = np.clip(y_pred, 0, None)  # No permitir ventas negativas
+        y_pred_solo_log = np.clip(np.expm1(np.clip(y_pred_log, 0, None)), 0, None)
+
+        # Especialista de target relativo: aprende log1p(y) - log1p(base) en vez de
+        # log1p(y). Al predecir un ratio contra la escala del SKU en lugar de un nivel
+        # absoluto, rompe el techo de extrapolación del Random Forest, que nunca puede
+        # devolver un valor por encima del máximo visto en entrenamiento y por eso
+        # sub-predecía sistemáticamente los SKUs de alto volumen en crecimiento.
+        y_pred = y_pred_solo_log
+        if model_family == "random_forest":
+            cols_ratio = self.FEATURE_COLS + self.EXTRA_FEATURE_COLS
+            log_base_train = np.log1p(df.loc[train_mask, "base_escala"].to_numpy(dtype=float))
+            log_base_test = np.log1p(df.loc[test_mask, "base_escala"].to_numpy(dtype=float))
+
+            print("[TRAIN] Entrenando especialista de target relativo (max_leaf_nodes=30000)...")
+            ratio_model = RandomForestRegressor(
+                n_estimators=100,
+                max_leaf_nodes=30000,
+                n_jobs=-1,
+                random_state=42
+            )
+            ratio_model.fit(df.loc[train_mask, cols_ratio], y_train_log - log_base_train)
+            _CACHED_RATIO_MODEL = ratio_model
+
+            pred_ratio_log = ratio_model.predict(df.loc[test_mask, cols_ratio]) + log_base_test
+            y_pred_ratio = np.clip(np.expm1(np.clip(pred_ratio_log, 0, None)), 0, None)
+            y_pred = self.aplicar_techo_relativo(y_pred_solo_log, y_pred_ratio)
 
         mae = float(mean_absolute_error(y_test, y_pred)) if len(y_test) > 0 else 0.0
         rmse = float(np.sqrt(mean_squared_error(y_test, y_pred))) if len(y_test) > 0 else 0.0
@@ -204,6 +288,7 @@ class DbTrainerPredictor:
 
     def generate_and_save_predictions(self, model: Any,
                                        company_model_map: Union[Dict[str, str], str]) -> int:
+        global _CACHED_RATIO_MODEL
         query_prods = """
             SELECT DISTINCT 
                 p.id AS id_producto,
@@ -219,11 +304,14 @@ class DbTrainerPredictor:
                 COALESCE(r.lag_1, r.unidades_vendidas) AS last_lag_1,
                 COALESCE(r.lag_2, r.unidades_vendidas) AS last_lag_2,
                 COALESCE(r.ma_3m, r.unidades_vendidas) AS last_ma_3m,
+                COALESCE(r.market_share_unidades, 0) AS last_market_share,
+                COALESCE(r.price_gap_pct, 0) AS last_price_gap,
                 r.anio AS last_anio,
                 r.mes AS last_mes
             FROM (
                 SELECT
                     id_producto, anio, mes, unidades_vendidas, lag_1, lag_2, ma_3m,
+                    market_share_unidades, price_gap_pct,
                     ROW_NUMBER() OVER (PARTITION BY id_producto ORDER BY anio DESC, mes DESC) AS rn
                 FROM ventas_mensuales
             ) r
@@ -302,6 +390,16 @@ class DbTrainerPredictor:
         ids_prod_clean = prods_merged["id_producto_clean"].to_numpy()
         ids_emp = prods_merged["id_empresa"].to_numpy()
         val_unitarios = prods_merged["valor_unitario"].fillna(10000.0).to_numpy(dtype=np.float32)
+
+        # Última observación conocida de las variables contemporáneas. En entrenamiento
+        # el especialista de ratio las ve desplazadas un mes, así que el valor más
+        # reciente del histórico es justamente lo que corresponde usar al proyectar.
+        last_market_share = prods_merged.get(
+            "last_market_share", pd.Series(0.0, index=prods_merged.index)
+        ).fillna(0.0).to_numpy(dtype=np.float32)
+        last_price_gap = prods_merged.get(
+            "last_price_gap", pd.Series(0.0, index=prods_merged.index)
+        ).fillna(0.0).to_numpy(dtype=np.float32)
 
         base_units_series = prods_merged["avg_unidades"].fillna(50.0)
         l1_series = prods_merged["last_lag_1"].fillna(base_units_series)
@@ -392,9 +490,35 @@ class DbTrainerPredictor:
             seasonal_ratio = np.clip(l12 / np.maximum(base_units, 1.0), 0.70, 1.40)
 
             if hasattr(model, "estimators_") and len(model.estimators_) > 0:
-                tree_preds_raw = np.array([tree.predict(X_step) for tree in model.estimators_])  # shape: (50, N)
-                tree_preds_units = np.expm1(np.clip(tree_preds_raw, 0, None))  # shape: (50, N)
-                tree_preds_mod = tree_preds_units * seasonal_ratio  # shape: (50, N)
+                ratio_model = _CACHED_RATIO_MODEL
+                if ratio_model is not None:
+                    # Matriz extendida del especialista de ratio. El orden de las columnas
+                    # debe coincidir con FEATURE_COLS + EXTRA_FEATURE_COLS.
+                    base_escala = self.calcular_base_escala(ma3, l1, l12)
+                    log_base = np.log1p(base_escala)
+                    X_step_ratio = np.column_stack([
+                        X_step,
+                        np.sin(2 * np.pi * curr_m / 12.0),
+                        np.cos(2 * np.pi * curr_m / 12.0),
+                        val_unitarios, last_price_gap, last_market_share,
+                        log_base,
+                    ])
+                    tree_source, X_trees, desplazamiento = ratio_model, X_step_ratio, log_base
+                else:
+                    # Sin especialista en caché (por ejemplo, tras reiniciar el proceso sin
+                    # reentrenar) se degrada al comportamiento logarítmico previo.
+                    tree_source, X_trees, desplazamiento = model, X_step, 0.0
+
+                tree_preds_raw = np.array([tree.predict(X_trees) for tree in tree_source.estimators_])  # shape: (n_arboles, N)
+                tree_preds_units = np.expm1(np.clip(tree_preds_raw + desplazamiento, 0, None))  # shape: (n_arboles, N)
+                tree_preds_mod = tree_preds_units * seasonal_ratio  # shape: (n_arboles, N)
+
+                if ratio_model is not None:
+                    # Techo relativo aplicado a la distribución completa, no solo al valor
+                    # central: así los percentiles y la banda de confianza quedan coherentes
+                    # con la predicción publicada.
+                    techo = self.K_TECHO_RELATIVO * np.maximum(preds_raw * seasonal_ratio, 1.0)
+                    tree_preds_mod = np.minimum(tree_preds_mod, techo)
 
                 pred_p10 = np.percentile(tree_preds_mod, 10, axis=0)
                 pred_p50 = np.percentile(tree_preds_mod, 50, axis=0)
@@ -470,6 +594,15 @@ class DbTrainerPredictor:
         except Exception as e:
             print(f"[ERROR] Falló la inserción de predicciones en MySQL: {e}")
             raise e
+        finally:
+            # El especialista de ratio solo interviene aquí: ni el simulador ni el
+            # endpoint XAI lo consultan. Liberarlo apenas termina el cierre devuelve el
+            # consumo en régimen al nivel previo al híbrido, dejando el pico de dos
+            # ensambles acotado a la ventana del cierre mensual. El próximo cierre lo
+            # reentrena de todas formas antes de volver a predecir.
+            _CACHED_RATIO_MODEL = None
+            gc.collect()
+            print("[MEM] Especialista de ratio liberado tras el cierre.")
 
     def simulate_product_scenarios(self, id_producto: str, precio_pct: float = 0.0,
                                    usd_pct: float = 0.0, ipc_pct: float = 0.0) -> List[Dict[str, Any]]:
