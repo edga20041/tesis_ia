@@ -1,138 +1,108 @@
-# Proyecto de Tesis de IA
+# tesis_ia — Microservicio de Inteligencia Artificial
 
-Base estructural para desarrollar, entrenar y evaluar modelos de inteligencia artificial con una organizacion clara, escalable y mantenible.
+Microservicio de **pronóstico de demanda** de la Plataforma de Inteligencia Predictiva B2B (Proyecto Final de Ingeniería, UADE). Se expone como API REST con FastAPI y lo consume el backend transaccional (`tesis_back`), que a su vez sirve al frontend (`tesis_front`).
 
-## Objetivo
+## Qué hace
 
-Este repositorio deja preparado el esqueleto del proyecto para que la implementacion tecnica crezca sin mezclar responsabilidades entre codigo, datos, configuraciones, artefactos y resultados.
+| Capacidad | Descripción | Módulo |
+|---|---|---|
+| **Cierre mensual** | Sincroniza variables exógenas, recalcula *features*, entrena el modelo y persiste predicciones a 12 meses | `training/db_trainer_predictor.py`, `data/` |
+| **Modelo Champion** | Random Forest sobre `log1p(unidades)` más un especialista de razón acotado por un techo relativo (K = 1,25): modelo híbrido | `training/db_trainer_predictor.py` |
+| **Simulador *what-if*** | Proyecta 12 meses variando precio, tipo de cambio e IPC | `training/db_trainer_predictor.py` |
+| **Arranque en frío** | Estima la demanda de un producto sin historial por similitud con productos maduros (K-Means, KNN, TF-IDF, rampa de Bass, elasticidad de precio) | `models/cold_start.py` |
+| **Explicabilidad** | Importancia de variables del modelo vigente | `training/db_trainer_predictor.py` |
+| **Intervalos de confianza** | Cuantiles P10, P50 y P90 a partir de la varianza del ensamble | `training/db_trainer_predictor.py` |
 
-## Estructura Actual
+El modelo vigente en producción es `champion_rf_2025_12`, con **MAE 209,22, RMSE 2.509,10 y MAPE 15,66 %** (validación fuera de muestra).
+
+## API
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| `GET` | `/health` | Estado del servicio y de la conexión a la base |
+| `POST` | `/pipeline/run-cierre-mensual` | Ejecuta el cierre mensual de un período (`anio`, `mes`) |
+| `POST` | `/simulation/predict` | Simulación de escenarios de un producto |
+| `POST` | `/cold-start/predict` | Proyección de un producto nuevo sin historial |
+| `GET` | `/model/explainability` | Importancia de variables del modelo |
+
+Contratos detallados en [`docs/api.md`](docs/api.md). La documentación interactiva (Swagger) está en `/docs` con el servicio en ejecución.
+
+## Estructura del código
 
 ```text
-tesis_ia/
-├── src/
-│   └── tesis_ia/
-│       ├── __init__.py
-│       ├── data/
-│       ├── models/
-│       ├── training/
-│       ├── evaluation/
-│       └── utils/
-├── config/
-│   ├── base.yaml
-│   ├── config.yaml
-│   ├── data.yaml
-│   ├── model.yaml
-│   ├── training.yaml
-│   ├── evaluation.yaml
-│   └── experiments/
-│       └── baseline.yaml
+src/tesis_ia/
+├── api.py                     # API FastAPI (punto de entrada del servicio)
+├── config.py                  # Carga y fusión de la configuración YAML
 ├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── splits/
-├── artifacts/
-│   ├── checkpoints/
-│   ├── final/
-│   └── metadata/
-├── outputs/
-│   ├── predictions/
-│   ├── plots/
-│   └── reports/
-├── docs/
-│   ├── architecture.md
-│   ├── api.md
-│   └── troubleshooting.md
-├── notebooks/
-├── scripts/
-├── tests/
-├── logs/
-├── .env.example
-├── .gitignore
-├── Dockerfile
-├── requirements.txt
-├── requirements-dev.txt
-├── setup.py
-└── README.md
+│   ├── exogenous_pipeline.py  # Clima (Open-Meteo), macro (IMF / Banco Mundial), feriados
+│   └── feature_calculator.py  # Consolidación semanal y features (lags, medias móviles, cuota de mercado)
+├── models/
+│   ├── factory.py             # Familias: regresión lineal, árbol, Random Forest, LightGBM, XGBoost
+│   └── cold_start.py          # Motor de arranque en frío
+├── training/
+│   └── db_trainer_predictor.py  # Entrenamiento, predicción, simulación y explicabilidad sobre la base
+└── utils/
+    └── db_connector.py        # Conexión a MySQL (SQLAlchemy)
+scripts/
+├── cron_cierre_mensual.sh     # Dispara el cierre mensual (crontab del VPS)
+├── experiment_tournament.py   # Torneo de modelos (resultados en la bitácora, fase 4)
+└── ...                        # Scripts de experimentación
+tests/                         # 165 pruebas (pytest)
 ```
 
-## Responsabilidades
+> **Nota.** `cli.py`, `pipeline.py`, `training/trainer.py`, `evaluation/` y los *scripts* `train.py`, `predict.py`, `evaluate.py` y `download_data.py` provienen de la plantilla original del proyecto. **El servicio en producción no los utiliza** (el contenedor ejecuta únicamente `tesis_ia.api:app`). Sus puntos de entrada devuelven un estado `planned`.
 
-| Carpeta | Responsabilidad |
+## Configuración
+
+Variables de entorno de la conexión a la base (`utils/db_connector.py`):
+
+| Variable | Valor por defecto |
 |---|---|
-| `src/tesis_ia/data` | Ingesta, validacion, preprocesamiento y particionado de datos |
-| `src/tesis_ia/models` | Definicion de arquitecturas y componentes del modelo |
-| `src/tesis_ia/training` | Orquestacion del entrenamiento, callbacks y checkpoints |
-| `src/tesis_ia/evaluation` | Evaluacion, metricas, analisis y reportes |
-| `src/tesis_ia/utils` | Utilidades realmente compartidas entre modulos |
-| `config/` | Configuracion separada por dominio y por experimento |
-| `data/` | Datos crudos, procesados y splits persistidos |
-| `artifacts/` | Checkpoints, modelos finales y metadatos |
-| `outputs/` | Predicciones, figuras y reportes generados |
-| `notebooks/` | Exploracion y prototipado |
-| `scripts/` | Puntos de entrada operativos del proyecto |
-| `tests/` | Tests unitarios e integracion |
+| `DB_HOST` | `localhost` |
+| `DB_PORT` | `3306` |
+| `DB_NAME` | `tesis` |
+| `DB_USER` | `root` |
+| `DB_PASSWORD` | (vacío) |
 
-## Decisiones de Organizacion
+La configuración YAML de `config/` (`config.yaml` unificado y archivos por dominio) la usan los scripts de entrenamiento y el torneo. En `config/model.yaml` figura una arquitectura de red neuronal heredada de la plantilla que **no** se entrena; el modelo real se selecciona en el código (`model_family="random_forest"`).
 
-- El paquete Python real vive en `src/tesis_ia`, no directamente en `src/`.
-- Se usa `artifacts/` en lugar de una carpeta raiz `models/` para no confundir codigo con modelos entrenados.
-- La configuracion se separa por dominio para facilitar experimentos reproducibles.
-- `config/config.yaml` queda como archivo unificado para escenarios simples o pruebas rapidas.
-- `utils/` queda reservado para helpers transversales; la logica de dominio debe vivir en su modulo correspondiente.
+## Ejecución
 
-## Configuracion
-
-### Config base
-
-- `config/base.yaml`: parametros globales del proyecto y runtime.
-- `config/data.yaml`: rutas y reglas de datos/preprocesamiento.
-- `config/model.yaml`: definicion estructural del modelo y artefactos.
-- `config/training.yaml`: hiperparametros de entrenamiento.
-- `config/evaluation.yaml`: evaluacion e inferencia.
-- `config/experiments/baseline.yaml`: stack sugerido para el experimento base.
-- `config/config.yaml`: version consolidada para entornos simples.
-
-## Instalacion
+### Con Docker (producción)
 
 ```bash
-python3 -m venv .venv
+docker compose up --build      # expone el puerto 8000
+```
+
+La imagen usa **Python 3.10** (`Dockerfile`) y arranca `uvicorn tesis_ia.api:app`. En el VPS, el contenedor se despliega mediante Portainer y el backend lo consume por la red interna `tesis-network` (`http://tesis-ia-api:8000`).
+
+> **Requisito operativo.** El servicio precarga el modelo al arrancar (`startup_event`), por lo que tarda varios minutos en responder tras un reinicio. Durante el cierre mensual el consumo de memoria alcanza un pico cercano a 2,3 GiB: el contenedor debe ejecutarse con un límite explícito (`--memory=3g`).
+
+### Local
+
+```bash
+python3.10 -m venv .venv
 source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-python3 -m pip install -e .
+pip install -r requirements.txt
+PYTHONPATH=src uvicorn tesis_ia.api:app --port 8000
 ```
 
-## Uso Recomendado
+Las versiones fijadas en `requirements.txt` no compilan en intérpretes posteriores a Python 3.10.
 
-### Desarrollo del paquete
+## Pruebas
 
 ```bash
-python3 -m pip install -e .
+pip install pytest==7.4.0 pytest-cov==4.1.0 httpx
+python -m pytest --cov=src/tesis_ia
 ```
 
-### Verificacion de imports
+Son 165 pruebas: lógica de arranque en frío, modelo híbrido, ausencia de fuga de datos en las *features*, configuración y capa REST (con dobles para la base y el modelo). El flujo de GitHub Actions (`.github/workflows/tests.yml`) las ejecuta en cada *push* y *pull request* hacia `master`. No están cubiertos los métodos que dependen de la base (`train_and_evaluate`, `generate_and_save_predictions`, etc.).
 
-```bash
-PYTHONPATH=src python3 -c "import tesis_ia; print(tesis_ia.__version__)"
-```
+## Documentación
 
-### Tests
+- [`docs/api.md`](docs/api.md): contratos de la API.
+- [`docs/architecture.md`](docs/architecture.md) y [`docs/troubleshooting.md`](docs/troubleshooting.md): documentos genéricos de la plantilla.
 
-```bash
-pytest
-pytest --cov=src/tesis_ia
-```
+## Autores
 
-## Estado del Proyecto
-
-El repositorio esta preparado como esqueleto organizativo. Todavia no implementa la logica de entrenamiento, evaluacion o prediccion; la estructura quedo lista para empezar a construir esas capas sin reordenar todo despues.
-
-## Documentacion
-
-- Arquitectura: [docs/architecture.md](docs/architecture.md)
-- API interna: [docs/api.md](docs/api.md)
-- Troubleshooting: [docs/troubleshooting.md](docs/troubleshooting.md)
-
-## Autor
-
-Edgardo Crespo y Felipe Calderon
+Edgardo Crespo y Felipe Calderón.
