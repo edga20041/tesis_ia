@@ -53,6 +53,14 @@ class DbTrainerPredictor:
     # evaluado sin reajuste sobre 2024-12/2025-12.
     K_TECHO_RELATIVO = 1.25
 
+    # Elasticidades de la demanda simulada a 12 meses. Son supuestos de negocio fijos, no valores
+    # estimados desde los datos: en las pruebas el modelo no responde ni al precio, ni al dolar, ni a
+    # la inflacion dentro del rango observado (ver seccion 7.7 de la tesis). Efecto sobre las unidades
+    # = ELASTICIDAD * variacion porcentual de la variable.
+    ELASTICIDAD_PRECIO = -1.8
+    ELASTICIDAD_USD = -0.17
+    ELASTICIDAD_IPC = -0.20
+
     def __init__(self, engine=None):
         self.engine = engine or get_engine()
 
@@ -702,16 +710,12 @@ class DbTrainerPredictor:
         cur_date = datetime.date(start_year, start_month, 1)
         simulados = []
 
-        macro_elasticity_factor = max(
-            0.40,
-            min(
-                1.80,
-                1.0 
-                - (0.50 * (precio_pct / 100.0))
-                - (0.20 * (usd_pct / 100.0))
-                - (0.25 * (ipc_pct / 100.0))
-            )
-        )
+        # El modelo aporta la línea base. Precio, dólar e inflación se aplican como elasticidades fijas
+        # sobre la demanda predicha; las variables exógenas del modelo no se alteran para no contar dos veces.
+        factor_precio = max(0.0, 1.0
+            + self.ELASTICIDAD_PRECIO * (precio_pct / 100.0)
+            + self.ELASTICIDAD_USD * (usd_pct / 100.0)
+            + self.ELASTICIDAD_IPC * (ipc_pct / 100.0))
 
         for _ in range(1, 13):
             if cur_date.month == 12:
@@ -729,26 +733,26 @@ class DbTrainerPredictor:
                 t_max = float(e[1])
                 t_med = float(e[2])
                 precip = float(e[3])
-                ipc_ind = float(e[4]) * (1.0 + (ipc_pct / 100.0))
-                ipc_var = float(e[5]) * (1.0 + (ipc_pct / 100.0))
-                tc_usd = float(e[6]) * (1.0 + (usd_pct / 100.0))
+                ipc_ind = float(e[4])
+                ipc_var = float(e[5])
+                tc_usd = float(e[6])
                 n_feriados = float(e[7])
                 has_festivo = float(e[8])
             else:
                 t_max, t_med, precip = 30.0, 25.0, 100.0
-                ipc_ind = 100.0 * (1.0 + (ipc_pct / 100.0))
-                ipc_var = 4.5 * (1.0 + (ipc_pct / 100.0))
-                tc_usd = 7200.0 * (1.0 + (usd_pct / 100.0))
+                ipc_ind = 100.0
+                ipc_var = 4.5
+                tc_usd = 7200.0
                 n_feriados, has_festivo = 0.0, 0.0
 
             seasonal_ratio = (l12 / base_units) if base_units > 0 else 1.0
             seasonal_ratio = max(0.70, min(1.40, seasonal_ratio))
 
             feature_vector = np.array([[
-                l1 * macro_elasticity_factor,
-                l2 * macro_elasticity_factor,
-                l12 * macro_elasticity_factor,
-                ma3 * macro_elasticity_factor,
+                l1,
+                l2,
+                l12,
+                ma3,
                 t_max, t_med, precip,
                 ipc_ind, ipc_var, tc_usd,
                 n_feriados, has_festivo
@@ -760,19 +764,25 @@ class DbTrainerPredictor:
                 p10 = float(np.percentile(tree_preds_units, 10))
                 p50 = float(np.percentile(tree_preds_units, 50))
                 p90 = float(np.percentile(tree_preds_units, 90))
-                pred_unidades = round(p50, 2) if p50 > 0 else max(1.0, round(l12 * macro_elasticity_factor, 2))
+                pred_unidades = round(p50, 2) if p50 > 0 else max(1.0, round(l12, 2))
                 sim_inf = round(max(0.0, p10), 2)
                 sim_sup = round(max(pred_unidades, p90), 2)
             else:
                 pred_raw_log = float(model.predict(feature_vector)[0])
                 pred_raw = float(np.expm1(max(0.0, pred_raw_log)))
                 if pred_raw <= 0:
-                    pred_unidades = max(1.0, round(l12 * macro_elasticity_factor, 2))
+                    pred_unidades = max(1.0, round(l12, 2))
                 else:
                     pred_unidades = round(pred_raw * seasonal_ratio, 2)
                 sim_inf = round(pred_unidades * 0.85, 2)
                 sim_sup = round(pred_unidades * 1.15, 2)
 
+            # El rezago del mes siguiente usa la predicción del modelo, sin el efecto precio, para que
+            # la elasticidad no se componga mes a mes.
+            pred_modelo = pred_unidades
+            pred_unidades = round(pred_modelo * factor_precio, 2)
+            sim_inf = round(sim_inf * factor_precio, 2)
+            sim_sup = round(sim_sup * factor_precio, 2)
             monto_simulado = round(pred_unidades * sim_val_unitario, 2)
 
             simulados.append({
@@ -786,7 +796,7 @@ class DbTrainerPredictor:
             })
 
             l2 = l1
-            l1 = pred_unidades
+            l1 = pred_modelo
             ma3 = round((l1 + l2) / 2.0, 2)
 
         return simulados
