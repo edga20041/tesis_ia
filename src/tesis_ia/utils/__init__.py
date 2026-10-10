@@ -2,15 +2,10 @@
 
 from tesis_ia.utils.constants import DEFAULT_RANDOM_SEED, PROJECT_NAME
 from tesis_ia.utils.db_connector import get_db_session, get_engine, test_connection
-from tesis_ia.utils.helpers import ensure_dir, write_json
-from tesis_ia.utils.paths import resolve_project_paths
 
 __all__ = [
     "DEFAULT_RANDOM_SEED",
     "PROJECT_NAME",
-    "ensure_dir",
-    "write_json",
-    "resolve_project_paths",
     "get_engine",
     "get_db_session",
     "test_connection",

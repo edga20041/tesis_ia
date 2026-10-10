@@ -28,14 +28,6 @@ setup(
     include_package_data=True,
     python_requires=">=3.10",
     install_requires=requirements,
-    entry_points={
-        "console_scripts": [
-            "tesis-ia-train=tesis_ia.cli:train_main",
-            "tesis-ia-evaluate=tesis_ia.cli:evaluate_main",
-            "tesis-ia-predict=tesis_ia.cli:predict_main",
-            "tesis-ia-data=tesis_ia.cli:data_main",
-        ]
-    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",
