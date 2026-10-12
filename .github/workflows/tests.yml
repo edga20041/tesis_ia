@@ -31,4 +31,4 @@ jobs:
           pip install -r requirements.txt pytest==7.4.0 pytest-cov==4.1.0 httpx
 
       - name: Ejecutar suite de pruebas
-        run: python -m pytest --cov=src/tesis_ia --cov-report=term
+        run: python -m pytest --cov=src/tesis_ia --cov-report=term --cov-fail-under=85
