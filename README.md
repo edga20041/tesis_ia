@@ -47,7 +47,7 @@ scripts/
 ├── cron_cierre_mensual.sh     # Dispara el cierre mensual (crontab del VPS)
 ├── experiment_tournament.py   # Torneo de modelos (resultados en la bitácora, fase 4)
 └── ...                        # Scripts de experimentación
-tests/                         # 165 pruebas (pytest)
+tests/                         # 223 pruebas (pytest)
 ```
 
 > **Nota.** `cli.py`, `pipeline.py`, `training/trainer.py`, `evaluation/` y los *scripts* `train.py`, `predict.py`, `evaluate.py` y `download_data.py` provienen de la plantilla original del proyecto. **El servicio en producción no los utiliza** (el contenedor ejecuta únicamente `tesis_ia.api:app`). Sus puntos de entrada devuelven un estado `planned`.
@@ -96,7 +96,7 @@ pip install pytest==7.4.0 pytest-cov==4.1.0 httpx
 python -m pytest --cov=src/tesis_ia
 ```
 
-Son 165 pruebas: lógica de arranque en frío, modelo híbrido, ausencia de fuga de datos en las *features*, configuración y capa REST (con dobles para la base y el modelo). El flujo de GitHub Actions (`.github/workflows/tests.yml`) las ejecuta en cada *push* y *pull request* hacia `master`. No están cubiertos los métodos que dependen de la base (`train_and_evaluate`, `generate_and_save_predictions`, etc.).
+Son 223 pruebas: lógica de arranque en frío, modelo híbrido, ausencia de fuga de datos en las *features*, configuración y capa REST (con dobles para la base y el modelo). El flujo de GitHub Actions (`.github/workflows/tests.yml`) las ejecuta en cada *push* y *pull request* hacia `master`. No están cubiertos los métodos que dependen de la base (`train_and_evaluate`, `generate_and_save_predictions`, etc.).
 
 ## Documentación
 
