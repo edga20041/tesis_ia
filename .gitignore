@@ -67,3 +67,7 @@ logs/*
 *.pth
 .wandb/
 tb_logs/
+
+# Notas personales
+bitacora_tesis.md
+.codex
